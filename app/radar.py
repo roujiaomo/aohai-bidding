@@ -42,6 +42,8 @@ DEFAULT_CONFIG = ROOT / "config.json"
 # 业务时区：北京时间。服务器可能跑在 UTC，所有“近/满 N 天”判断必须用同一时区，
 # 否则入库过滤与页面过滤会差 8 小时，出现两边都看不到或两边都看到的记录。
 CN_TZ = timezone(timedelta(hours=8))
+FETCH_JOB_LOCK = threading.Lock()
+FETCH_JOB = {"state": "idle", "message": "", "started_at": "", "finished_at": ""}
 
 
 def cn_today() -> datetime:
@@ -2982,8 +2984,6 @@ thead th{padding:13px 14px;background:linear-gradient(90deg,#092451,#0b3476);col
 
     <!-- Page: Dashboard -->
     <div class="page active" id="page-dashboard">
-      <div class="stats-row" id="stats"></div>
-
       <div class="card">
         <div class="card-header">
           <span>商机列表</span>
@@ -3012,7 +3012,6 @@ thead th{padding:13px 14px;background:linear-gradient(90deg,#092451,#0b3476);col
 
     <!-- Page: History -->
     <div class="page" id="page-history">
-      <div class="stats-row" id="history-stats"></div>
       <div class="card">
         <div class="card-header">
           <span>历史公告（全库）</span>
@@ -3120,9 +3119,11 @@ thead th{padding:13px 14px;background:linear-gradient(90deg,#092451,#0b3476);col
         <div class="help-detail-tabs">
           <button class="help-detail-tab active" onclick="switchHelpDetail('search',this)">&#128269; 检索规则</button>
           <button class="help-detail-tab" onclick="switchHelpDetail('ingest',this)">&#128230; 入库规则</button>
+          <button class="help-detail-tab" onclick="switchHelpDetail('ai',this)">&#129302; AI 评审规则</button>
         </div>
         <div class="help-detail-pane active" id="help-detail-search"></div>
         <div class="help-detail-pane" id="help-detail-ingest"></div>
+        <div class="help-detail-pane" id="help-detail-ai"></div>
       </div>
     </div>
 
@@ -3155,6 +3156,7 @@ thead th{padding:13px 14px;background:linear-gradient(90deg,#092451,#0b3476);col
               <tbody id="deleted-rows"></tbody>
             </table>
           </div>
+          <div class="pagination" id="deleted-pagination"></div>
         </div>
       </div>
     </div>
@@ -3259,7 +3261,7 @@ function displayTitle(value){
   }
   return s||'未命名公告';
 }
-let SRC_NAMES={},currentPage=1,pageSize=15,currentMarketTab='direct'
+let SRC_NAMES={},currentPage=1,pageSize=6,currentMarketTab='direct',deletedPage=1,fetchPollTimer=null
 let currentRules=null
 /* 当前页面已加载的公告。点击标题时优先展示数据库保存的抓取正文，不直接离开系统。 */
 let tenderDetailMap={};
@@ -3311,8 +3313,8 @@ function switchPage(name,el){
   if(name==='rules')loadRulesEditor();
   if(name==='help')loadHelp();
   if(name==='sources')loadSources();
-  if(name==='history'){loadHistoryStats();loadHistoryTenders(1);}
-  if(name==='deleted')loadDeleted();
+  if(name==='history'){loadHistoryTenders(1);}
+  if(name==='deleted')loadDeleted(1);
   if(name==='ai-review')loadAiReviewCount();
   if(name==='ai-review')ensureAiReviewFrame();
 }
@@ -3338,8 +3340,8 @@ async function loadHelp(){
 function renderHelpRules(){
   if(!currentRules)return;
   const rules=currentRules, kws=rules.tyc_search_keywords||[], lv=rules.opportunity_levels||{};
-  const search=document.querySelector('#help-detail-search'), ingest=document.querySelector('#help-detail-ingest');
-  if(!search||!ingest)return;
+  const search=document.querySelector('#help-detail-search'), ingest=document.querySelector('#help-detail-ingest'), ai=document.querySelector('#help-detail-ai');
+  if(!search||!ingest||!ai)return;
   search.innerHTML=`
     <div class="card help-card"><div class="card-body">
       <h3>这套规则在做什么？</h3>
@@ -3370,6 +3372,11 @@ function renderHelpRules(){
     <div class="card help-card"><div class="card-body"><h3>加分与展示级别</h3>
       <ul><li>命中一级重点地区加 15 分；二级重点地区加 8 分。</li><li>采购单位命中重点客户词：首次加 12 分，每多命中一个加 4 分，最高加 20 分。</li><li>预算达到 50 万元加 8 分。</li><li>AIS/VDES 仅在确认海事语境后额外加 30 分；电力行业的 AIS（空气绝缘开关设备）不会按海事项目计算。</li><li>总分最高 100 分。${Number(lv.key_threshold)||80} 分及以上显示为“重点关注”；${Number(lv.follow_threshold)||50} 分及以上显示为“值得跟进”；低于该值为“一般关注”。这些级别用于排序，<b>并不是入库门槛</b>。</li></ul>
     </div></div>`;
+  ai.innerHTML=`
+    <div class="card help-card"><div class="card-body"><h3>AI 评审在做什么？</h3><p>DeepSeek 只读取公告标题、采购方、地区、日期和最多 3000 字原文；它不会执行公告里的任何指令，也不会凭空推断公司资质或可参与性。</p><div class="help-note"><b>当前口径：</b>相关但不确定的项目优先保守处理；人工结论始终优先，AI 结论可在“AI评审”页面复核。</div></div></div>
+    <div class="card help-card"><div class="card-body"><h3>三种结论</h3><div class="help-step"><span class="help-step-no">1</span><div><b>直接商机：</b>原文同时证明还有采购/供货/分包入口，并明确采购对象匹配 AIS/VDES、船岸通信、ECDIS/INS、船舶监管或港航数据平台等能力。</div></div><div class="help-step"><span class="help-step-no">2</span><div><b>市场情报：</b>业务相关但没有当前参与入口，例如中标、成交、候选人结果或已关闭项目；保留作客户、供应商和竞争格局线索。</div></div><div class="help-step"><span class="help-step-no">3</span><div><b>AI 排除：</b>明确无关或命中强制排除。排除记录可以人工改为通过。</div></div></div></div>
+    <div class="card help-card"><div class="card-body"><h3>明确排除什么？</h3><p>招聘/招录/录用、废标/流标/终止、合同/验收、环评；电力行业的 AIS；普通 LED、普通电子元件、保险、培训、会议、劳务；以及没有海事通信、导航、船舶信息、通航安全或港航监管实质采购内容的项目。</p><p><b>注意：</b>单独出现“海事、船舶、AIS、卫星、海洋、港口、智慧港口”等词不等于匹配。施工、疏浚、设计、监理、航标维护和只采购单一雷达/CCTV/北斗/VHF 的项目，必须由公告原文证明与遨海能力直接相关。</p></div></div>
+    <div class="card help-card"><div class="card-body"><h3>证据与人工核查</h3><p>每个关键判断都要保存公告原文短句；没有采购入口或能力匹配证据的“直接商机”会自动降为市场情报。资格、业绩、授权、保密和联合体要求只会提示人工核查，不能凭此臆测可参与。</p></div></div>`;
 }
 
 async function loadAiReviewCount(){
@@ -3387,7 +3394,8 @@ async function loadStats(){
   let s=await api('/api/stats');
   document.querySelector('#direct-tab-count').textContent=`(${Number(s.direct||0)})`;
   document.querySelector('#market-tab-count').textContent=`(${Number(s.market||0)})`;
-  document.querySelector('#stats').innerHTML=`
+  let stats=document.querySelector('#stats'); if(!stats)return;
+  stats.innerHTML=`
     <div class="stat-card"><div class="stat-num">${s.total}</div><div class="stat-label">有效公告</div></div>
     <div class="stat-card key"><div class="stat-num">${s.key}</div><div class="stat-label">重点关注</div></div>
     <div class="stat-card follow"><div class="stat-num">${s.follow}</div><div class="stat-label">值得跟进</div></div>
@@ -3523,7 +3531,8 @@ function closeTenderDetail(){
 let historyPage=1;
 async function loadHistoryStats(){
   let s=await api('/api/history-stats');
-  document.querySelector('#history-stats').innerHTML=`
+  let stats=document.querySelector('#history-stats'); if(!stats)return;
+  stats.innerHTML=`
     <div class="stat-card"><div class="stat-num">${s.total}</div><div class="stat-label">全库公告</div></div>
     <div class="stat-card key"><div class="stat-num">${s.key}</div><div class="stat-label">重点关注</div></div>
     <div class="stat-card follow"><div class="stat-num">${s.follow}</div><div class="stat-label">值得跟进</div></div>
@@ -3560,23 +3569,28 @@ function goHistoryPage(p){loadHistoryTenders(p)}
 /* ---- fetch latest data ---- */
 async function doFetch(){
   let btn=document.querySelector('#fetch-btn');
-  btn.disabled=true; btn.textContent='抓取中…';
-  setLoading(true,'正在获取最新数据…');
+  btn.disabled=true; btn.textContent='正在启动…';
   try{
-    let r=await fetch('api/fetch',{method:'POST'});
-    let j=await r.json();
+    let r=await fetch('api/fetch',{method:'POST'}), raw=await r.text();
+    let j; try{j=JSON.parse(raw)}catch(_){throw new Error(`服务器返回 ${r.status}，抓取已在后台继续，请稍后查看任务状态。`)}
     if(j.ok){
-      showDialog('抓取完成',j.message);
-      loadStats(); loadTenders();
+      btn.textContent='后台抓取中…'; pollFetchStatus();
     }else{
       showDialog('抓取失败',j.error||'未知错误');
     }
   }catch(e){
     showDialog('请求失败',e.message);
-  }finally{
-    setLoading(false);
-    btn.disabled=false; btn.textContent='获取最新数据';
   }
+}
+async function pollFetchStatus(){
+  if(fetchPollTimer)clearTimeout(fetchPollTimer);
+  try{
+    let s=await api('/api/fetch-status'),btn=document.querySelector('#fetch-btn');
+    if(s.state==='running'){btn.disabled=true;btn.textContent='后台抓取中…';fetchPollTimer=setTimeout(pollFetchStatus,3000);return;}
+    btn.disabled=false;btn.textContent='获取最新数据';
+    if(s.state==='completed'){showDialog('抓取完成',s.message||'抓取完成');loadStats();loadTenders();}
+    else if(s.state==='failed')showDialog('抓取失败',s.message||'后台任务失败');
+  }catch(e){fetchPollTimer=setTimeout(pollFetchStatus,5000);}
 }
 
 /* ---- sources ---- */
@@ -3920,14 +3934,19 @@ function confirmAction(msg, onConfirm){
 }
 
 /* ---- recycle bin ---- */
-async function loadDeleted(){
+async function loadDeleted(pg){
+  if(pg)deletedPage=pg;
   try{
-    let r=await api('/api/deleted');
+    let r=await api(`/api/deleted?page=${deletedPage}&page_size=${pageSize}`);
     let rows=r.rows||[];
-    document.getElementById('deleted-hint').textContent=rows.length?`共 ${rows.length} 条已标记无用的记录`:'回收站为空';
+    let total=Number(r.total||0), totalPages=Math.max(1,Math.ceil(total/pageSize));
+    if(deletedPage>totalPages){deletedPage=totalPages;return loadDeleted();}
+    document.getElementById('deleted-hint').textContent=total?`共 ${total} 条已标记无用的记录`:'回收站为空';
     let tbody=document.getElementById('deleted-rows');
+    let pagination=document.getElementById('deleted-pagination');
     if(!rows.length){
       tbody.innerHTML='<tr><td colspan="4" style="text-align:center;color:#999;padding:2rem">暂无已删除记录</td></tr>';
+      pagination.innerHTML='';
       return;
     }
     tbody.innerHTML=rows.map(x=>{
@@ -3947,6 +3966,10 @@ async function loadDeleted(){
         </td>
       </tr>`;
     }).join('');
+    let html=`<button onclick="loadDeleted(${deletedPage-1})" ${deletedPage<=1?'disabled':''}>上一页</button>`;
+    for(let i=Math.max(1,deletedPage-2);i<=Math.min(totalPages,deletedPage+2);i++)html+=i===deletedPage?`<span class="pg-current">${i}</span>`:`<button onclick="loadDeleted(${i})">${i}</button>`;
+    html+=`<button onclick="loadDeleted(${deletedPage+1})" ${deletedPage>=totalPages?'disabled':''}>下一页</button><span class="pg-info">${total} 条</span>`;
+    pagination.innerHTML=html;
   }catch(e){console.error(e);showDialog('加载失败',e.message);}
 }
 
@@ -4152,11 +4175,19 @@ def make_handler(db_path: Path):
                     self.send_json({"rows":result,"total":total}); return
                 # ---- 回收站：已标记无用的记录 ----
                 if url.path == "/api/deleted":
-                    rows=conn.execute("SELECT * FROM tenders WHERE is_deleted=1 ORDER BY updated_at DESC").fetchall()
+                    page=max(1, int(params.get("page", ["1"])[0] or 1))
+                    page_size=max(1, min(50, int(params.get("page_size", ["6"])[0] or 6)))
+                    total=conn.execute("SELECT count(*) FROM tenders WHERE is_deleted=1").fetchone()[0]
+                    rows=conn.execute("SELECT * FROM tenders WHERE is_deleted=1 ORDER BY updated_at DESC LIMIT ? OFFSET ?",
+                                      (page_size, (page-1)*page_size)).fetchall()
                     result = rows_as_dicts(rows)
                     for r in result:
                         r["rating"] = r.get("priority") or rating_label(r["score"], (cfg.get("rules") or {}).get("opportunity_levels"))
-                    self.send_json({"rows":result}); return
+                    self.send_json({"rows":result, "total":total}); return
+                if url.path == "/api/fetch-status":
+                    with FETCH_JOB_LOCK:
+                        self.send_json(dict(FETCH_JOB))
+                    return
                 self.send_error(404)
             except Exception as exc: self.send_error(500, str(exc))
             finally: conn.close()
@@ -4215,11 +4246,21 @@ def make_handler(db_path: Path):
                     if errors:
                         msg += "\n失败: " + "; ".join(errors)
                     return msg
-                try:
-                    result_msg = _bg_fetch()
-                    self.send_json({"ok": True, "message": result_msg})
-                except Exception as exc:
-                    self.send_json({"ok": False, "error": str(exc)})
+                with FETCH_JOB_LOCK:
+                    if FETCH_JOB["state"] == "running":
+                        self.send_json({"ok": True, "running": True, "message": "抓取任务正在执行，请稍候。"})
+                        return
+                    FETCH_JOB.update({"state": "running", "message": "正在准备抓取…", "started_at": now(), "finished_at": ""})
+                def _run_fetch():
+                    try:
+                        result_msg = _bg_fetch()
+                        with FETCH_JOB_LOCK:
+                            FETCH_JOB.update({"state": "completed", "message": result_msg, "finished_at": now()})
+                    except Exception as exc:
+                        with FETCH_JOB_LOCK:
+                            FETCH_JOB.update({"state": "failed", "message": str(exc), "finished_at": now()})
+                threading.Thread(target=_run_fetch, name="radar-fetch", daemon=True).start()
+                self.send_json({"ok": True, "started": True, "message": "抓取已在后台开始，可继续浏览页面。"})
             elif url.path == "/api/config":
                 length = int(self.headers.get("Content-Length", 0))
                 body = self.rfile.read(length).decode("utf-8")
