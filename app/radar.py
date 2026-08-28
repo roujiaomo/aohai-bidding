@@ -31,6 +31,8 @@ if str(AUTH_MODULE_DIR) not in sys.path:
     sys.path.insert(0, str(AUTH_MODULE_DIR))
 from shared_auth import (LOGIN_HTML, auth_enabled, clear_cookies, csrf_valid, current_user, init_auth,
                          login as auth_login, logout as auth_logout, session_cookies)
+from ingestion_policy import ingestion_issue_reason, non_opportunity_reason, title_gate_reason
+from source_parsers import parse_li_list
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DB = ROOT / "data" / "radar.db"
@@ -630,30 +632,9 @@ def same_project_title(a: str, b: str) -> bool:
     # 其他小差异用序列相似度兜底（阈值取高，因数字差异已被前置校验拦截）
     return difflib.SequenceMatcher(None, a, b).ratio() >= 0.92
 
-# 非商机公告：这些事项已经没有可参与的采购机会，或根本不是采购公告。
-# 必须在入库前拦截，不能依赖业务关键词或地区分数“抬”进商机库。
-_NON_OPPORTUNITY_TITLE_RE = re.compile(
-    r"招聘|招录|拟聘用|拟录用|录用人员|录取人员|"
-    # 中标/成交结果本身保留：对业务相关项目，可作为后续供应商、采购方和竞争格局情报。
-    r"废标|流标|终止公告|暂停公告|作废公告|合同公告|验收公告|"
-    r"环境影响(?:评价)?报告(?:书)?(?:全本)?(?:及.*)?公示|环评(?:报告)?(?:书)?(?:全本)?(?:及.*)?公示")
-
 _MARITIME_CONTEXT_RE = re.compile(
     r"船舶|海事|航道|航标|航运|航行|港口|港航|通航|船岸|岸基|甚高频|"
     r"VHF|VTS|水上|海上|海洋|渔船|渔港|海图|船载|船闸|船队", re.I)
-
-def non_opportunity_reason(item: dict) -> str:
-    """返回明确不应进入商机库的标题原因；空串表示未命中硬排除规则。"""
-    title = str(item.get("title") or "")
-    if not title:
-        return "标题为空"
-    if re.search(r"招聘|招录|拟聘用|拟录用|录用人员|录取人员", title):
-        return "招聘/录用公告"
-    if re.search(r"废标|流标|终止公告|暂停公告|作废公告|合同公告|验收公告", title):
-        return "废标或履约阶段公告"
-    if re.search(r"环境影响(?:评价)?报告(?:书)?(?:全本)?(?:及.*)?公示|环评(?:报告)?(?:书)?(?:全本)?(?:及.*)?公示", title):
-        return "环评/公众参与公示"
-    return ""
 
 def ccgp_search_keyword_ok(item: dict, keyword: str) -> bool:
     """政采网检索结果二次校验。
@@ -672,21 +653,6 @@ def ccgp_search_keyword_ok(item: dict, keyword: str) -> bool:
         standalone = bool(re.search(r"(?<![a-z0-9])vdes(?![a-z0-9])", text, re.I))
     return standalone and bool(_MARITIME_CONTEXT_RE.search(text))
 
-# ---- 入库噪声闸：官网全站抓取会把政策文件/新闻动态/薪酬披露混进来，正文碰巧命中业务词就得高分 ----
-# 招采特征词：真商机标题几乎必含其一（命中即放行）。
-_PROCURE_FEATURE_RE = re.compile(
-    r"招标|采购|中标|成交|磋商|竞谈|竞价|询价|比选|谈判|单一来源|公告|公示|候选人|结果|出让|转让|拍卖|选聘|征集|预选|招募|挂网")
-# 新闻/政务通告噪声模式：无招采特征且命中下列模式 → 拒收（即使正文命中业务关键词）。
-_NOISE_TITLE_RE = re.compile(
-    r"通知|通告|办法|管控措施|征求意见|解读|救助|搜救|护航|台风|普法|宣贯|讲事故|碰撞|启用|"
-    r"考试|考录|面试|录用|复审|许可|资质|评选|考核|监督检查|工作计划|工作总结|执行情况|评估|"
-    r"部门预算|工资总额|薪酬|目录|名单|说明$|确认$")
-# 项目结构词：标题无招采特征词但含这些词的多为真商机（聚合源标题常不带“招标公告”尾缀）。
-_PROCURE_STRUCT_RE = re.compile(
-    r"标段|监理|勘察设计|测量|扫测|维保|维修保养|技术服务|设计咨询|工程|项目")
-# 站点导航/友情链接误抓的裸机构名标题（云南航务等列表页解析噪声）。
-_SITE_NAME_RE = re.compile(r"^中华人民共和国|^交通运输部$|^海事局$|^西双版纳海事局$|^云南交通技师学院$")
-
 # 公告阶段词表（长词在前，正则交替式保证长词优先且匹配不重叠）。
 _NOTICE_STAGE_RE = re.compile(
     r"中标候选人|招标公告|比选公告|磋商公告|谈判公告|询价公告|中标公告|成交公告|结果公告|候选人公示|"
@@ -702,21 +668,8 @@ def _notice_stage(norm_title: str) -> str:
     return hits[-1] if hits else "其他"
 
 def _title_gate_ok(item: dict, rules: dict) -> bool:
-    """噪声闸：标题含招采特征词 → 放行；命中新闻噪声模式/裸机构名 → 拒收；
-    列表页截断标题（尾带 …/...）或含项目结构词 → 放行；其余要求业务关键词在标题本身命中。
-    仅正文命中的政策新闻/动态不算商机。"""
-    title = item.get("title") or ""
-    if _PROCURE_FEATURE_RE.search(title):
-        return True
-    if _NOISE_TITLE_RE.search(title) or _SITE_NAME_RE.search(title):
-        return False
-    if title.rstrip().endswith(("...", "…")):
-        return True
-    if _PROCURE_STRUCT_RE.search(title):
-        return True
-    tl = title.lower()
-    return any(str(w).lower() in tl for cat in rules.get("business_categories", [])
-               for w in cat.get("keywords", []) if w)
+    """Compatibility wrapper for the central ingestion policy."""
+    return not title_gate_reason(item, rules)
 
 # ---- 商机分类打标（领导打法：前期线索 / 直接产品 / 集成项目）----
 # 分类名与关键词已改为可配置：config.json rules.opportunity_categories（界面：数据规则 → 商机分类），
@@ -911,11 +864,8 @@ def upsert_tender(conn: sqlite3.Connection, item: dict, link_ok: int = 1, rules:
         item["agency"] = ""
     score, matches = score_item(item, rules)
     stamp = now(); fp = fingerprint(item)
-    # ---- 无业务关键词命中（score=0），不入库 ----
-    if score == 0:
-        return False, 0
-    # ---- 噪声闸：政策文件/新闻动态/薪酬披露等仅正文碰词的记录不算商机 ----
-    if not _title_gate_ok(item, rules if rules is not None else RULES_DEFAULTS):
+    # ---- 中央入库策略：评分、标题噪声和来源栏目范围必须同时通过 ----
+    if ingestion_issue_reason(item, rules if rules is not None else RULES_DEFAULTS, score):
         return False, 0
     # ---- 已标记无用的记录，跳过不入库（含同指纹与近似标题：防止同一公告换个来源/变体“借尸还魂”）----
     deleted_check = conn.execute("SELECT id, is_deleted FROM tenders WHERE fingerprint=?", (fp,)).fetchone()
@@ -1714,31 +1664,7 @@ def _parse_trs_list(html: str, base: str, region: str) -> list[dict]:
     return items
 
 def _parse_li_list(html: str, base: str, region: str, link_re: str) -> list[dict]:
-    """通用列表解析：条目为 <li>…<a href>标题</a>…<span/td>日期</span>…</li>。
-    link_re 限定目标链接形态，避免抓到导航。日期在条目块内任意位置提取。"""
-    items: list[dict] = []
-    seen: set[str] = set()
-    pat = re.compile(link_re, re.I)
-    for m in re.finditer(r'<a\b[^>]*href="([^"]+)"[^>]*>(.*?)</a>', html, re.I | re.S):
-        href, inner = m.group(1), m.group(2)
-        if not pat.search(href):
-            continue
-        title = html_mod.unescape(re.sub(r"<[^>]+>", "", inner)).strip()
-        title = re.sub(r"\s+", " ", title).strip()
-        # 部分站点日期写在 <a> 内部，从标题尾部剔除（日期另从条目块提取）
-        title = re.sub(r"\s*(20\d{2}[-/.]\d{1,2}[-/.]\d{1,2})\s*$", "", title).strip()
-        if len(title) < 6:
-            continue
-        url = urljoin(base, href)
-        if url in seen:
-            continue
-        seen.add(url)
-        block = html[max(0, m.start() - 400): m.end() + 400]
-        dm = re.search(r"(20\d{2})[-/.](\d{1,2})[-/.](\d{1,2})", block)
-        date_str = f"{dm.group(1)}-{int(dm.group(2)):02d}-{int(dm.group(3)):02d}" if dm else ""
-        items.append({"source_url": url, "title": title, "published_at": date_str,
-                      "buyer": "", "region": region, "content": ""})
-    return items
+    return parse_li_list(html, base, region, link_re)
 
 def _crumb_of(html: str) -> str:
     """从详情页面包屑提取栏目名（如 当前位置：首页>政务公开>采购公告 → 采购公告）。"""
@@ -1872,7 +1798,8 @@ def fetch_zj_msa() -> list[dict]:
 def fetch_hn_msa() -> list[dict]:
     """海南海事局 — 项目招标栏目（JEECMS，日期为 [YY-MM-DD] 两位年格式）。"""
     base = "https://www.hn.msa.gov.cn/xxgk_4_6/index.jhtml"
-    items = _parse_li_list(_http_get(base), base, "海南海事", r"/xxgk_4_\d+/\d+\.jhtml\b")
+    # 仅接受项目招标栏目自身的详情链接；不能把页面导航中的其他公开栏目当招标公告。
+    items = _parse_li_list(_http_get(base), base, "海南海事", r"/xxgk_4_6/\d+\.jhtml\b")
     for it in items:
         if not it["published_at"]:
             dm = re.search(r"\[(\d{2})-(\d{1,2})-(\d{1,2})\]", it["title"])
@@ -4754,12 +4681,10 @@ def cmd_rescore(args):
 
 def quality_issue_reason(row: dict, rules: dict) -> str:
     """全库质量审计的硬性剔除条件；命中即不再作为商机展示。"""
-    reason = non_opportunity_reason(row)
+    score, _ = score_item(row, rules)
+    reason = ingestion_issue_reason(row, rules, score)
     if reason:
         return reason
-    score, _ = score_item(row, rules)
-    if score <= 0:
-        return "无业务关键词评分"
     codes = {x.strip() for x in str(row.get("source_code") or "").split(",")}
     title = str(row.get("title") or "")
     match = str(row.get("match_json") or "")
@@ -4772,6 +4697,16 @@ def cmd_quality_audit(args):
     """审计全库误入数据；--apply 仅移入回收站，可恢复，不物理删除。"""
     conn = connect(args.db); init_db(conn)
     rules = load_config().get("rules") or {}
+    ai_excluded_ids: set[int] = set()
+    if getattr(args, "include_ai_excluded", False) and AI_REVIEW_DB.exists():
+        try:
+            review_conn = sqlite3.connect(f"file:{AI_REVIEW_DB}?mode=ro", uri=True)
+            ai_excluded_ids = {int(row[0]) for row in review_conn.execute(
+                "SELECT source_tender_id FROM reviews WHERE ai_status='exclude'"
+            )}
+            review_conn.close()
+        except Exception as exc:
+            print(f"AI 排除记录读取失败，本次仅执行确定性规则审计：{exc}")
     rows = [dict(r) for r in conn.execute("SELECT * FROM tenders WHERE is_deleted=0 ORDER BY id").fetchall()]
     issues = []
     rescored = 0
@@ -4779,6 +4714,8 @@ def cmd_quality_audit(args):
         score, matches = score_item(row, rules)
         priority = rating_label(score, rules.get("opportunity_levels"))
         reason = quality_issue_reason(row, rules)
+        if not reason and row["id"] in ai_excluded_ids:
+            reason = "AI 评审明确排除（可在 AI 排除页复核）"
         if reason:
             issues.append((row, reason))
             continue
@@ -4838,6 +4775,7 @@ def parser():
     x.set_defaults(func=cmd_rescore)
     x=sub.add_parser("quality-audit",help="全库审计招聘/结果公告、零分和页面导航污染数据")
     x.add_argument("--apply",action="store_true",help="将明确误入数据移入回收站（不物理删除）")
+    x.add_argument("--include-ai-excluded",action="store_true",help="同时移入 AI 已明确排除的记录（可恢复）")
     x.set_defaults(func=cmd_quality_audit)
     x=sub.add_parser("serve"); x.add_argument("--host",default="127.0.0.1"); x.add_argument("--port",type=int,default=8787); x.set_defaults(func=cmd_serve)
     return p
