@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>公告列表 UI 重设计 · 三版样例</title>
+<style>
+  :root{
+    --blue:#2774c9; --blue-bg:#eaf4ff;
+    --red:#d65b6b; --red-bg:#fdf0f2;
+    --orange:#c87a18; --orange-bg:#fff7e8;
+    --green:#3f9463; --green-bg:#eef7f1;
+    --ink:#1f2733; --ink2:#5b6572; --ink3:#98a1ae;
+    --line:#e8edf3; --page:#f5f7fa; --card:#fff;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:"PingFang SC","Microsoft YaHei",system-ui,sans-serif;background:var(--page);color:var(--ink);font-size:14px}
+  .wrap{max-width:1060px;margin:0 auto;padding:24px 16px 90px}
+  h1{font-size:20px}
+  .sub{color:var(--ink2);font-size:13px;margin:4px 0 18px}
+
+  /* ---- 方案切换 ---- */
+  .tabs{display:flex;gap:8px;margin-bottom:6px;flex-wrap:wrap}
+  .tab{border:1px solid var(--line);background:#fff;padding:9px 18px;border-radius:8px;cursor:pointer;font-size:14px;font-weight:600;color:var(--ink2)}
+  .tab.active{background:var(--blue);border-color:var(--blue);color:#fff}
+  .desc{font-size:13px;color:var(--ink2);background:#fff;border:1px solid var(--line);border-radius:8px;padding:10px 14px;margin-bottom:16px;line-height:1.7}
+  .pane{display:none}
+  .pane.show{display:block}
+
+  /* ---- 共用：优先级配色 ---- */
+  .p-key{color:var(--red)}
+  .p-follow{color:var(--orange)}
+  .p-watch{color:var(--blue)}
+
+  /* ============================================================
+     方案 A：简洁克制（保留表格骨架，规范化徽章）
+  ============================================================ */
+  .a-table{width:100%;border-collapse:separate;border-spacing:0;background:#fff;border:1px solid var(--line);border-radius:10px;overflow:hidden}
+  .a-table thead th{background:#f4f8fd;color:var(--ink2);font-size:12.5px;font-weight:600;text-align:left;padding:10px 16px;border-bottom:1px solid var(--line);letter-spacing:.04em}
+  .a-table tbody td{padding:14px 16px;border-bottom:1px solid #f0f3f8;vertical-align:top}
+  .a-table tbody tr:last-child td{border-bottom:0}
+  .a-table tbody tr:hover{background:#f8fbff}
+  .a-prio{display:inline-block;font-size:12px;font-weight:600;padding:3px 10px;border-radius:99px;white-space:nowrap}
+  .a-prio.key{background:var(--red-bg);color:var(--red)}
+  .a-prio.follow{background:var(--orange-bg);color:var(--orange)}
+  .a-prio.watch{background:var(--blue-bg);color:var(--blue)}
+  .a-title{font-weight:600;color:#173b75;line-height:1.5;cursor:pointer}
+  .a-title:hover{color:var(--blue)}
+  .a-sub{margin-top:6px;display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-size:12px;color:var(--ink3)}
+  .a-point{color:var(--green);font-weight:600;background:var(--green-bg);padding:2px 8px;border-radius:5px;font-size:12px}
+  .a-tag{color:var(--ink2);background:#f2f4f8;padding:2px 8px;border-radius:5px;font-size:12px}
+  .a-cat{color:#4d65a9;background:#f1f4ff;padding:2px 8px;border-radius:5px;font-size:12px}
+  .a-date{color:var(--ink3);font-size:12.5px;white-space:nowrap;font-variant-numeric:tabular-nums}
+
+  /* ============================================================
+     方案 B：卡片式（每条公告一张卡片，左侧优先级色条）
+  ============================================================ */
+  .b-list{display:flex;flex-direction:column;gap:10px}
+  .b-card{background:#fff;border:1px solid var(--line);border-radius:10px;padding:14px 18px 12px 18px;position:relative;overflow:hidden;box-shadow:0 1px 3px rgba(16,42,84,.04)}
+  .b-card:hover{box-shadow:0 4px 14px rgba(16,42,84,.09);border-color:#d7e4f5}
+  .b-card::before{content:"";position:absolute;left:0;top:0;bottom:0;width:4px}
+  .b-card.key::before{background:var(--red)}
+  .b-card.follow::before{background:var(--orange)}
+  .b-card.watch::before{background:var(--blue)}
+  .b-top{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+  .b-prio{font-size:12px;font-weight:700}
+  .b-cat{font-size:12px;color:var(--ink2)}
+  .b-dot{width:3px;height:3px;border-radius:50%;background:#c6cdd8}
+  .b-src{font-size:12px;color:var(--ink3)}
+  .b-date{margin-left:auto;font-size:12.5px;color:var(--ink3);font-variant-numeric:tabular-nums}
+  .b-title{margin:8px 0 8px;font-size:15.5px;font-weight:600;color:#173b75;line-height:1.55;cursor:pointer}
+  .b-title:hover{color:var(--blue)}
+  .b-bottom{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+  .b-point{color:var(--green);font-weight:600;font-size:12.5px;display:inline-flex;align-items:center;gap:4px}
+  .b-point::before{content:"";width:6px;height:6px;border-radius:50%;background:var(--green);display:inline-block}
+  .b-tags{display:inline-flex;gap:6px;flex-wrap:wrap;margin-left:6px;padding-left:12px;border-left:1px solid var(--line)}
+  .b-tag{color:var(--ink2);background:#f2f4f8;padding:2px 9px;border-radius:99px;font-size:12px}
+
+  /* ============================================================
+     方案 C：数据紧凑（对齐表格，弱化徽章，适合快速扫读）
+  ============================================================ */
+  .c-table{width:100%;border-collapse:collapse;background:#fff;border:1px solid var(--line);border-radius:10px;overflow:hidden}
+  .c-table th{font-size:12px;color:var(--ink3);font-weight:600;text-align:left;padding:9px 14px;background:#fafbfd;border-bottom:1px solid var(--line)}
+  .c-table td{padding:11px 14px;border-bottom:1px solid #f2f5f9;vertical-align:middle}
+  .c-table tbody tr:nth-child(even){background:#fafcfe}
+  .c-table tbody tr:hover{background:#f0f6ff}
+  .c-table tbody tr:last-child td{border-bottom:0}
+  .c-prio{display:inline-flex;align-items:center;gap:6px;font-size:12.5px;font-weight:600;white-space:nowrap}
+  .c-prio::before{content:"";width:7px;height:7px;border-radius:50%}
+  .c-prio.key{color:var(--red)} .c-prio.key::before{background:var(--red)}
+  .c-prio.follow{color:var(--orange)} .c-prio.follow::before{background:var(--orange)}
+  .c-prio.watch{color:var(--blue)} .c-prio.watch::before{background:var(--blue)}
+  .c-title{font-size:13.5px;color:#173b75;font-weight:500;max-width:430px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer}
+  .c-title:hover{color:var(--blue);text-decoration:underline}
+  .c-meta{font-size:12px;color:var(--ink3);margin-top:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:430px}
+  .c-point{color:var(--green);font-weight:600;font-size:12.5px;white-space:nowrap;font-variant-numeric:tabular-nums}
+  .c-tags{font-size:12px;color:var(--ink2);white-space:nowrap}
+  .c-date{color:var(--ink3);font-size:12.5px;white-space:nowrap;font-variant-numeric:tabular-nums}
+
+  /* ---- 对照说明 ---- */
+  .note-box{margin-top:28px;background:#fff;border:1px solid var(--line);border-radius:10px;padding:16px 20px}
+  .note-box h3{font-size:14px;margin-bottom:8px}
+  .note-box ul{padding-left:20px;color:var(--ink2);font-size:13px;line-height:1.9}
+
+  /* ---- 原样复现（现状对照用）---- */
+  .o-table{width:100%;border-collapse:collapse;background:#fff}
+  .o-head{background:#2774c9;color:#fff;padding:8px 14px;font-size:13px;text-align:left}
+  .o-row td{padding:8px 14px;border-bottom:1px solid #eee;vertical-align:top}
+  .o-badge{display:inline-block;background:#cfe4fb;color:#2774c9;border-radius:12px;padding:2px 10px;font-size:12px;margin-right:-14px}
+  .o-badge2{display:inline-block;background:#2774c9;color:#fff;border-radius:12px;padding:2px 10px;font-size:12px}
+  .o-point{background:#52a06d;color:#fff;padding:2px 8px;border-radius:4px;font-size:12px}
+  .o-kw{font-size:12px;color:#666}
+  .o-pill{display:inline-block;background:#eee;border-radius:10px;padding:1px 8px;font-size:12px;margin:1px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>公告列表 UI 重设计 · 三版样例</h1>
+  <div class="sub">用真实数据渲染，点上方标签切换方案。选定后告诉我编号，我再改产品代码。</div>
+
+  <div class="tabs">
+    <div class="tab active" data-t="a">方案 A · 简洁克制</div>
+    <div class="tab" data-t="b">方案 B · 卡片式</div>
+    <div class="tab" data-t="c">方案 C · 数据紧凑</div>
+    <div class="tab" data-t="o">现状对照</div>
+  </div>
+
+  <!-- ==================== 方案 A ==================== -->
+  <div class="pane show" id="pane-a">
+    <div class="desc">
+      <b>思路：</b>保留现有三列表格骨架（优先级 / 公告 / 发布日期），只治"乱"：徽章统一圆角胶囊、一行只出现一次优先级；
+      类别、金额、关键词全部收进标题下方的灰色辅助行，字号降级为 12px——<b>主视觉只剩标题</b>，扫读节奏一致。
+    </div>
+    <table class="a-table">
+      <thead><tr><th style="width:110px">优先级</th><th>公告</th><th style="width:100px;text-align:right">发布日期</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><span class="a-prio key">重点关注</span></td>
+          <td>
+            <div class="a-title">天津港集疏运通道工程（二期）施工招标公告</div>
+            <div class="a-sub"><span class="a-cat">集成项目</span><span class="a-point">金额 2,350.00 万元</span><span class="a-tag">智慧港口</span><span class="a-tag">码头工程</span><span>天津港集团</span></div>
+          </td>
+          <td class="a-date" style="text-align:right">2026-08-21</td>
+        </tr>
+        <tr>
+          <td><span class="a-prio follow">值得跟进</span></td>
+          <td>
+            <div class="a-title">中国民航大学卫星通信和监视信道模拟系统采购项目中标公告</div>
+            <div class="a-sub"><span class="a-cat">设备采购</span><span class="a-point">金额 48.10 万元</span><span class="a-tag">卫星通信</span><span>中国民航大学</span></div>
+          </td>
+          <td class="a-date" style="text-align:right">2026-08-20</td>
+        </tr>
+        <tr>
+          <td><span class="a-prio watch">一般关注</span></td>
+          <td>
+            <div class="a-title">长江干线武汉至安庆段 6 米水深航道整治工程疏浚砂综合利用（砂石销售）招标公告</div>
+            <div class="a-sub"><span class="a-cat">集成项目</span><span class="a-point">工期 12 个月</span><span class="a-tag">航道整治</span><span class="a-tag">疏浚</span><span>长江航道局</span></div>
+          </td>
+          <td class="a-date" style="text-align:right">2026-08-19</td>
+        </tr>
+        <tr>
+          <td><span class="a-prio watch">一般关注</span></td>
+          <td>
+            <div class="a-title">山东港口日照港区智慧绿色码头信息化系统升级改造项目竞争性磋商公告</div>
+            <div class="a-sub"><span class="a-cat">信息化</span><span class="a-point">金额 486.50 万元</span><span class="a-tag">智慧港口</span><span class="a-tag">信息化</span><span>山东港口集团</span></div>
+          </td>
+          <td class="a-date" style="text-align:right">2026-08-18</td>
+        </tr>
+        <tr>
+          <td><span class="a-prio follow">值得跟进</span></td>
+          <td>
+            <div class="a-title">北部湾港钦州港区自动化集装箱码头三期工程装卸设备采购中标结果公告</div>
+            <div class="a-sub"><span class="a-cat">设备采购</span><span class="a-point">金额 1,280.00 万元</span><span class="a-tag">码头工程</span><span class="a-tag">自动化</span><span>北部湾港</span></div>
+          </td>
+          <td class="a-date" style="text-align:right">2026-08-15</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- ==================== 方案 B ==================== -->
+  <div class="pane" id="pane-b">
+    <div class="desc">
+      <b>思路：</b>每条公告一张卡片，优先级降级为左侧 4px 色条 + 小字标注（不再抢视觉）；
+      卡片内部三层结构：顶部元信息行（优先级·类别·来源·日期）→ 标题 → 底部要点与关键词，信息分组清晰，适合逐条细读。
+    </div>
+    <div class="b-list">
+      <div class="b-card key">
+        <div class="b-top"><span class="b-prio p-key">● 重点关注</span><span class="b-cat">集成项目</span><span class="b-dot"></span><span class="b-src">天津港集团</span><span class="b-date">2026-08-21</span></div>
+        <div class="b-title">天津港集疏运通道工程（二期）施工招标公告</div>
+        <div class="b-bottom">
+          <span class="b-point">金额 2,350.00 万元</span>
+          <span class="b-tags"><span class="b-tag">智慧港口</span><span class="b-tag">码头工程</span></span>
+        </div>
+      </div>
+      <div class="b-card follow">
+        <div class="b-top"><span class="b-prio p-follow">● 值得跟进</span><span class="b-cat">设备采购</span><span class="b-dot"></span><span class="b-src">中国政府采购网</span><span class="b-date">2026-08-20</span></div>
+        <div class="b-title">中国民航大学卫星通信和监视信道模拟系统采购项目中标公告</div>
+        <div class="b-bottom">
+          <span class="b-point">金额 48.10 万元</span>
+          <span class="b-tags"><span class="b-tag">卫星通信</span></span>
+        </div>
+      </div>
+      <div class="b-card watch">
+        <div class="b-top"><span class="b-prio p-watch">● 一般关注</span><span class="b-cat">集成项目</span><span class="b-dot"></span><span class="b-src">长江航道局</span><span class="b-date">2026-08-19</span></div>
+        <div class="b-title">长江干线武汉至安庆段 6 米水深航道整治工程疏浚砂综合利用（砂石销售）招标公告</div>
+        <div class="b-bottom">
+          <span class="b-point">工期 12 个月</span>
+          <span class="b-tags"><span class="b-tag">航道整治</span><span class="b-tag">疏浚</span></span>
+        </div>
+      </div>
+      <div class="b-card follow">
+        <div class="b-top"><span class="b-prio p-follow">● 值得跟进</span><span class="b-cat">设备采购</span><span class="b-dot"></span><span class="b-src">北部湾港</span><span class="b-date">2026-08-15</span></div>
+        <div class="b-title">北部湾港钦州港区自动化集装箱码头三期工程装卸设备采购中标结果公告</div>
+        <div class="b-bottom">
+          <span class="b-point">金额 1,280.00 万元</span>
+          <span class="b-tags"><span class="b-tag">码头工程</span><span class="b-tag">自动化</span></span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ==================== 方案 C ==================== -->
+  <div class="pane" id="pane-c">
+    <div class="desc">
+      <b>思路：</b>信息密度最高的一版。优先级只是一个彩色圆点+文字；金额、关键词、日期各占固定列、等宽数字对齐；
+      斑马纹+悬停高亮，适合一天几十上百条快速扫读，一屏看更多。
+    </div>
+    <table class="c-table">
+      <thead><tr><th style="width:92px">优先级</th><th>公告</th><th style="width:130px">核心要点</th><th style="width:150px">关键词</th><th style="width:86px;text-align:right">日期</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><span class="c-prio key">重点关注</span></td>
+          <td><div class="c-title">天津港集疏运通道工程（二期）施工招标公告</div><div class="c-meta">集成项目 · 天津港集团</div></td>
+          <td class="c-point">金额 2,350.00 万元</td>
+          <td class="c-tags">智慧港口 · 码头工程</td>
+          <td class="c-date" style="text-align:right">2026-08-21</td>
+        </tr>
+        <tr>
+          <td><span class="c-prio follow">值得跟进</span></td>
+          <td><div class="c-title">中国民航大学卫星通信和监视信道模拟系统采购项目中标公告</div><div class="c-meta">设备采购 · 中国政府采购网</div></td>
+          <td class="c-point">金额 48.10 万元</td>
+          <td class="c-tags">卫星通信</td>
+          <td class="c-date" style="text-align:right">2026-08-20</td>
+        </tr>
+        <tr>
+          <td><span class="c-prio watch">一般关注</span></td>
+          <td><div class="c-title">长江干线武汉至安庆段 6 米水深航道整治工程疏浚砂综合利用（砂石销售）招标公告</div><div class="c-meta">集成项目 · 长江航道局</div></td>
+          <td class="c-point">工期 12 个月</td>
+          <td class="c-tags">航道整治 · 疏浚</td>
+          <td class="c-date" style="text-align:right">2026-08-19</td>
+        </tr>
+        <tr>
+          <td><span class="c-prio watch">一般关注</span></td>
+          <td><div class="c-title">山东港口日照港区智慧绿色码头信息化系统升级改造项目竞争性磋商公告</div><div class="c-meta">信息化 · 山东港口集团</div></td>
+          <td class="c-point">金额 486.50 万元</td>
+          <td class="c-tags">智慧港口 · 信息化</td>
+          <td class="c-date" style="text-align:right">2026-08-18</td>
+        </tr>
+        <tr>
+          <td><span class="c-prio follow">值得跟进</span></td>
+          <td><div class="c-title">北部湾港钦州港区自动化集装箱码头三期工程装卸设备采购中标结果公告</div><div class="c-meta">设备采购 · 北部湾港</div></td>
+          <td class="c-point">金额 1,280.00 万元</td>
+          <td class="c-tags">码头工程 · 自动化</td>
+          <td class="c-date" style="text-align:right">2026-08-15</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- ==================== 现状对照 ==================== -->
+  <div class="pane" id="pane-o">
+    <div class="desc">
+      <b>现状问题复现：</b>两个徽章（优先级+类别）互相挤压重叠；"关键词"纯文本与灰底胶囊混排；
+      绿底白字金额块颜色过重；标题过长撑破行高；蓝色表头与多色徽章互相竞争注意力。
+    </div>
+    <table class="o-table" style="border:1px solid #ddd">
+      <tr><td class="o-head" style="width:170px">优先级</td><td class="o-head">公告</td><td class="o-head" style="width:110px">发布日期</td></tr>
+      <tr>
+        <td><span class="o-badge">一般关注</span><span class="o-badge2">集成项目</span></td>
+        <td>
+          <div style="font-weight:700">中国民航大学卫星通信和监视信道模拟系统采购项目中标公告</div>
+          <div style="margin-top:4px"><span class="o-point">金额 48.100000万元</span></div>
+          <div style="margin-top:4px"><span class="o-kw">关键词</span> <span class="o-pill">智慧港口</span><span class="o-pill">码头工程</span></div>
+        </td>
+        <td style="padding:8px 14px;color:#666">2026-08-20</td>
+      </tr>
+      <tr>
+        <td><span class="o-badge">一般关注</span><span class="o-badge2">集成项目</span></td>
+        <td>
+          <div style="font-weight:700">长江干线武汉至安庆段 6 米水深航道整治工程疏浚砂综合利用（砂石销售）招标公告超长标题不换行撑破布局</div>
+          <div style="margin-top:4px"><span class="o-point">金额 48.100000万元</span></div>
+          <div style="margin-top:4px"><span class="o-kw">关键词</span> <span class="o-pill">智慧港口</span><span class="o-pill">码头工程</span></div>
+        </td>
+        <td style="padding:8px 14px;color:#666">2026-08-19</td>
+      </tr>
+    </table>
+  </div>
+
+  <!-- ==================== 三版共性说明 ==================== -->
+  <div class="note-box">
+    <h3>三个方案共同修复的问题</h3>
+    <ul>
+      <li><b>徽章不再重叠：</b>优先级只出现一次，类别标签降级为辅助信息（灰底小胶囊或文字），与优先级分离摆放。</li>
+      <li><b>关键词统一样式：</b>去掉"关键词"纯文本前缀，标签全部同款胶囊/文字分隔，一组一个样式。</li>
+      <li><b>金额要点降噪：</b>绿底白字改为浅绿底+绿字（方案 B 改为圆点+文字），保留醒目但不刺眼。</li>
+      <li><b>长标题治理：</b>方案 A 允许两行自然折行；方案 C 单行省略号；行高、留白统一节奏。</li>
+      <li><b>颜色收敛：</b>全页只保留红（重点）/橙（跟进）/蓝（一般）/绿（金额）四个语义色，表头改浅灰不再抢戏。</li>
+      <li><b>数字等宽：</b>日期与金额使用等宽数字（tabular-nums），列对齐整齐。</li>
+    </ul>
+    <h3 style="margin-top:14px">怎么选</h3>
+    <ul>
+      <li><b>方案 A</b>：改动最小、最接近现在的表格形态，稳妥之选。</li>
+      <li><b>方案 B</b>：视觉最舒服、分组最清晰，但单屏显示条数最少。</li>
+      <li><b>方案 C</b>：扫读效率最高、一屏看最多，适合数据量上来以后（现在已 260+ 条且持续增长）。</li>
+    </ul>
+  </div>
+</div>
+
+<script>
+document.querySelectorAll('.tab').forEach(t=>{
+  t.addEventListener('click',()=>{
+    document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));
+    document.querySelectorAll('.pane').forEach(x=>x.classList.remove('show'));
+    t.classList.add('active');
+    document.getElementById('pane-'+t.dataset.t).classList.add('show');
+  });
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,8 @@
+{
+  "page_size": 50,
+  "filter_expired": true,
+  "auto_expire_days": 30,
+  "verify_links": true,
+  "verify_link_timeout": 8,
+  "retention_days": 365
+}

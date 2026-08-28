@@ -1,0 +1,24 @@
+# Runtime data and local settings
+/data/
+/outputs/
+/work/
+/config.json
+
+# Local development tooling and Python caches
+/.qoder/
+/.workbuddy/
+__pycache__/
+*.py[cod]
+
+# One-off capture and debugging artifacts
+/_cb_*
+/_ceb_*
+/_chinabidding_test.html
+/_oauth_*.png
+/api_response.json
+
+# OS and editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
