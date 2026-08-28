@@ -307,7 +307,10 @@ def analyze(limit: int) -> dict:
     for r in rs:
         if budget<=0: break
         try:
-            result, meta=deepseek(r,conf); budget-=meta["cost"]; status=result["bucket"]
+            result, meta=deepseek(r,conf); budget-=meta["cost"]
+            # bucket 描述业务价值；ai_status 驱动前端列表，两者不能混用。
+            # 市场情报仍有业务价值但缺少当前参与入口，进入人工队列而不是从页面消失。
+            status={"direct_opportunity":"approved","market_intelligence":"manual_review","exclude":"exclude"}.get(result["bucket"],"manual_review")
             c.execute("""UPDATE reviews SET ai_status=?,ai_label='',bucket=?,project_type=?,supplier_lead=?,ai_fit_score=?,ai_confidence=?,ai_reason_json=?,ai_evidence_json=?,ai_model=?,profile_version=?,prompt_version=?,input_tokens=?,output_tokens=?,cache_hit_tokens=?,estimated_usd=?,error='',analyzed_at=? WHERE id=?""",
               (status,result["bucket"],result["project_type"],int(result["supplier_lead"]),int(result.get("fit_score",0)),float(result.get("confidence",0)),json.dumps({"matched_capabilities":ReviewTextCleaner.capabilities(result.get("matched_capabilities",[])),"reasons":ReviewTextCleaner.list(result.get("reasons",[])),"risk_notes":ReviewTextCleaner.list(result.get("risk_notes",[])),"exclude_reason":ReviewTextCleaner.text(result.get("exclude_reason",""))},ensure_ascii=False),json.dumps([{"field":ReviewTextCleaner.text(x.get("field","")),"quote":ReviewTextCleaner.text(x.get("quote",""))} for x in result.get("evidence",[]) if isinstance(x,dict)],ensure_ascii=False),conf["model"],conf["profile_version"],"aohai-review-v4",meta["input"],meta["output"],meta["hit"],meta["cost"],now(),r["id"]))
             c.execute("INSERT INTO api_usage(day,source_review_id,model,input_tokens,output_tokens,cache_hit_tokens,estimated_usd,created_at) VALUES(?,?,?,?,?,?,?,?)",(today(),r["id"],conf["model"],meta["input"],meta["output"],meta["hit"],meta["cost"],now())); done+=1
