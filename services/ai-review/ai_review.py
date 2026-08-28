@@ -231,7 +231,7 @@ def sync_candidates() -> int:
         if tender_has_passed_deadline(x):
             # 旧记录也同步截止日，但明确标注为已过期，不送给 DeepSeek。
             c.execute("""INSERT INTO reviews(source_tender_id,title,buyer,region,budget,published_at,deadline_at,source_url,content,keyword_score,source_priority,source_updated_at,synced_at,ai_status,ai_label)
-              VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'expired','已过截止日期') ON CONFLICT(source_tender_id) DO UPDATE SET deadline_at=excluded.deadline_at,source_updated_at=excluded.source_updated_at,synced_at=excluded.synced_at,ai_status=CASE WHEN reviews.ai_status IN ('pending','expired') THEN 'expired' ELSE reviews.ai_status END,ai_label=CASE WHEN reviews.ai_status IN ('pending','expired') THEN '已过截止日期' ELSE reviews.ai_label END""",
+              VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'expired','已过截止日期') ON CONFLICT(source_tender_id) DO UPDATE SET deadline_at=excluded.deadline_at,source_updated_at=excluded.source_updated_at,synced_at=excluded.synced_at,ai_status=CASE WHEN reviews.ai_status IN ('approved_manual','rejected_manual') THEN reviews.ai_status ELSE 'expired' END,ai_label=CASE WHEN reviews.ai_status IN ('approved_manual','rejected_manual') THEN reviews.ai_label ELSE '已过截止日期' END""",
               (x["id"],x["title"],x["buyer"],x["region"],x["budget"],x["published_at"],x["deadline_at"],x["source_url"],x["content"],x["score"],x["priority"],x["updated_at"],stamp))
             continue
         active_count += 1
@@ -309,8 +309,9 @@ def analyze(limit: int) -> dict:
         try:
             result, meta=deepseek(r,conf); budget-=meta["cost"]
             # bucket 描述业务价值；ai_status 驱动前端列表，两者不能混用。
-            # 市场情报仍有业务价值但缺少当前参与入口，进入人工队列而不是从页面消失。
-            status={"direct_opportunity":"approved","market_intelligence":"manual_review","exclude":"exclude"}.get(result["bucket"],"manual_review")
+            # 非排除项直接留在实时商机，并统一进入 AI 审批列表；业务桶仍完整保存，
+            # 供后续人工结论和学习使用，不再制造重复的“待人工评审”队列。
+            status={"direct_opportunity":"approved","market_intelligence":"approved","exclude":"exclude"}.get(result["bucket"],"approved")
             c.execute("""UPDATE reviews SET ai_status=?,ai_label='',bucket=?,project_type=?,supplier_lead=?,ai_fit_score=?,ai_confidence=?,ai_reason_json=?,ai_evidence_json=?,ai_model=?,profile_version=?,prompt_version=?,input_tokens=?,output_tokens=?,cache_hit_tokens=?,estimated_usd=?,error='',analyzed_at=? WHERE id=?""",
               (status,result["bucket"],result["project_type"],int(result["supplier_lead"]),int(result.get("fit_score",0)),float(result.get("confidence",0)),json.dumps({"matched_capabilities":ReviewTextCleaner.capabilities(result.get("matched_capabilities",[])),"reasons":ReviewTextCleaner.list(result.get("reasons",[])),"risk_notes":ReviewTextCleaner.list(result.get("risk_notes",[])),"exclude_reason":ReviewTextCleaner.text(result.get("exclude_reason",""))},ensure_ascii=False),json.dumps([{"field":ReviewTextCleaner.text(x.get("field","")),"quote":ReviewTextCleaner.text(x.get("quote",""))} for x in result.get("evidence",[]) if isinstance(x,dict)],ensure_ascii=False),conf["model"],conf["profile_version"],"aohai-review-v4",meta["input"],meta["output"],meta["hit"],meta["cost"],now(),r["id"]))
             c.execute("INSERT INTO api_usage(day,source_review_id,model,input_tokens,output_tokens,cache_hit_tokens,estimated_usd,created_at) VALUES(?,?,?,?,?,?,?,?)",(today(),r["id"],conf["model"],meta["input"],meta["output"],meta["hit"],meta["cost"],now())); done+=1
@@ -576,6 +577,44 @@ HTML += r'''<script>
 })();
 </script>'''
 
+# 评审页收敛为“AI 审批通过 / AI 排除”两条工作流；列表按页加载并采用紧凑双列布局。
+HTML = HTML.replace("let activeList='manual',reviewRows=[];", "let activeList='approved',reviewRows=[];")
+HTML = HTML.replace("let reviewable=['manual_review','exclude'].includes(x.ai_status)", "let reviewable=['approved','exclude'].includes(x.ai_status)")
+HTML = HTML.replace("A('api/records?list=manual&page=1&page_size=12')", "A('api/records?list=approved&page=1&page_size=12')")
+HTML = HTML.replace("reviewRows=r.rows||[];renderListTabs(s);", "reviewRows=r.rows||[];window.aiReviewPager={...r,list:k};renderListTabs(s);")
+HTML = HTML.replace("reviewRows=r.rows||[];hint.textContent=", "reviewRows=r.rows||[];window.aiReviewPager={...r,list:'approved'};hint.textContent=")
+HTML = HTML.replace("window.switchReviewList=async k=>{if(activeList===k)return;activeList=k;", "window.switchReviewList=async (k,page=1)=>{if(activeList===k&&page===window.aiReviewPager?.page)return;activeList=k;")
+HTML = HTML.replace("A(`api/records?list=${k}&page=1&page_size=12`)", "A(`api/records?list=${k}&page=${page}&page_size=12`)")
+HTML += r'''<script>
+(()=>{
+  const style=document.createElement('style');style.textContent=`
+    .wrap{max-width:1480px}.panel{padding:13px}.card{padding:12px 14px;margin:0}
+    #records{display:grid;grid-template-columns:repeat(auto-fit,minmax(500px,1fr));gap:12px;align-items:start}
+    .review-template{gap:8px;margin-top:8px}.review-template .tpl{padding:9px 10px;line-height:1.6}
+    .review-template .tpl.wide{display:none}.review-state-tabs{grid-column:1/-1;margin:8px 0 0}
+    .ai-review-pager{grid-column:1/-1;display:flex;justify-content:center;align-items:center;gap:9px;padding:5px 0 2px;color:#6d8098}
+    .ai-review-pager button{margin:0}.ai-review-pager button:disabled{opacity:.45;cursor:not-allowed}
+    @media(max-width:1080px){#records{grid-template-columns:1fr}}`;
+  document.head.appendChild(style);
+  function tune(){
+    const tabs=document.getElementById('reviewStateTabs');
+    if(tabs){[...tabs.children].forEach(b=>{if(b.textContent.includes('待人工'))b.remove();if(b.textContent.includes('AI评审通过'))b.childNodes[0].nodeValue='AI 审批通过 '})}
+    const stats=document.getElementById('stats');
+    if(stats){[...stats.children].forEach(x=>{if(x.textContent.includes('待人工评审'))x.remove()});stats.style.gridTemplateColumns='repeat(2,minmax(0,1fr))'}
+    const root=document.getElementById('records'),p=window.aiReviewPager;
+    if(!root||!p||!p.total)return;
+    root.querySelector('.ai-review-pager')?.remove();
+    const pages=Math.max(1,Math.ceil(p.total/p.page_size));
+    if(pages<=1)return;
+    const el=document.createElement('div');el.className='ai-review-pager';
+    el.innerHTML=`<button class="btn gray" ${p.page<=1?'disabled':''} onclick="switchReviewList('${p.list}',${p.page-1})">上一页</button><span>第 ${p.page} / ${pages} 页，共 ${p.total} 条</span><button class="btn gray" ${p.page>=pages?'disabled':''} onclick="switchReviewList('${p.list}',${p.page+1})">下一页</button>`;
+    root.appendChild(el);
+  }
+  const root=document.getElementById('records');if(root)new MutationObserver(()=>requestAnimationFrame(tune)).observe(root,{childList:true,subtree:true});
+  const oldLoad=window.load;window.load=async()=>{await oldLoad();tune()};setTimeout(tune,250);
+})();
+</script>'''
+
 # 给评审页的所有后续写操作自动附加 CSRF 令牌；读取请求不受影响。
 HTML += r'''<script>
 (()=>{
@@ -674,7 +713,7 @@ class Handler(BaseHTTPRequestHandler):
                 note = str(data.get('note','')).strip()
                 if decision == 'rejected' and not note: raise ValueError('人工不通过必须填写原因')
                 status='approved_manual' if decision=='approved' else 'rejected_manual'; label='人工通过' if decision=='approved' else '人工不通过'
-                reviewed_at=now(); c=conn(); source=c.execute("SELECT * FROM reviews WHERE id=?",(review_id,)).fetchone(); cur=c.execute("UPDATE reviews SET ai_status=?,ai_label=?,reviewer='人工评审',reviewed_at=?,review_note=? WHERE id=? AND ai_status IN ('manual_review','exclude')",(status,label,reviewed_at,note[:500],review_id))
+                reviewed_at=now(); c=conn(); source=c.execute("SELECT * FROM reviews WHERE id=?",(review_id,)).fetchone(); cur=c.execute("UPDATE reviews SET ai_status=?,ai_label=?,reviewer='人工评审',reviewed_at=?,review_note=? WHERE id=? AND ai_status IN ('approved','manual_review','exclude')",(status,label,reviewed_at,note[:500],review_id))
                 if cur.rowcount != 1:
                     c.rollback(); c.close(); raise ValueError('该记录已被处理或不存在')
                 c.execute("""INSERT OR REPLACE INTO human_review_cases(source_review_id,title,buyer,region,source_url,keyword_score,ai_status_before,ai_reason_json,human_decision,human_note,reviewed_at)

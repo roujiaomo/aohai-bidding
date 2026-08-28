@@ -57,6 +57,8 @@ CONFIG_DEFAULTS = {
     "verify_links": True,
     "verify_link_timeout": 8,
     "retention_days": 365,
+    # 个别异步栏目可临时登记已核验的公告详情链接，下一轮抓取会回填并自动去重。
+    "yjh_purchase_seed_urls": [],
 }
 
 RULES_DEFAULTS = {
@@ -135,6 +137,7 @@ SOURCES = [
     ("cj_msa", "长江海事局", "http://cj.msa.gov.cn/", "public_http", "connected", "海事项目招标公告 + 中标公告栏目，TRS 静态列表，适配器已实现。与长航局公告部分重合，去重合并。"),
     ("sd_msa", "山东海事局", "https://www.sd.msa.gov.cn/", "public_http", "connected", "大汉 CMS：首页提取文章链接 + 详情页面包屑识别采购栏目，适配器已实现。"),
     ("js_msa", "江苏海事局", "http://www.js.msa.gov.cn/", "public_http", "connected", "大汉 CMS 通知公告栏目（含招标信息），适配器已实现，由评分管线筛选。"),
+    ("yjh_water", "江苏省泰州引江河管理处", "https://yjh.jswater.org.cn/yjh/xxgk/cggg/index.html", "public_http", "connected", "采购公告栏目；首页静态条目与配置的专项回填链接均会抓取。"),
     ("zj_msa", "浙江海事局", "https://www.zj.msa.gov.cn/", "public_http", "connected", "采购信息栏目（/ZJ/ 子站），TRS 静态列表，适配器已实现。"),
     ("hn_msa", "海南海事局", "https://www.hn.msa.gov.cn/", "public_http", "connected", "项目招标栏目（JEECMS，需 https），适配器已实现。"),
     ("cq_jtw", "重庆市交通运输委", "https://jtysw.cq.gov.cn/", "public_http", "connected", "招标公告栏目（含港航海事中心采购），TRS 静态列表，适配器已实现。"),
@@ -300,8 +303,9 @@ def ai_review_bucket_ids(bucket: str) -> set[int] | None:
     if not AI_REVIEW_DB.exists():
         return None
     status_map = {
-        "direct": ("direct_opportunity", "approved", "approved_manual"),
-        "market": ("market_intelligence",),
+        # AI 排除才从实时商机移出；其余结论统一作为可由用户自行处置的实时商机。
+        "direct": ("direct_opportunity", "market_intelligence", "approved", "approved_manual", "manual_review"),
+        "market": (),
     }
     statuses = status_map.get(bucket, ())
     if not statuses:
@@ -997,8 +1001,8 @@ def _normalize_date(raw: str) -> str:
     m = re.match(r"(\d{4})/(\d{2})/(\d{2})", raw)
     if m:
         return f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
-    # YYYY年MM月DD日
-    m = re.match(r"(\d{4})年(\d{1,2})月(\d{1,2})日", raw)
+    # YYYY年MM月DD日（提取正则有时只截取到“日”之前）
+    m = re.match(r"(\d{4})年(\d{1,2})月(\d{1,2})(?:日)?", raw)
     if m:
         return f"{m.group(1)}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
     # YYYY-MM-DD
@@ -1011,6 +1015,9 @@ def _extract_deadline(html: str, source_code: str) -> str:
     """从详情页 HTML 中提取投标截止日期，返回 YYYY-MM-DD 或空字符串。"""
     # 先去掉 HTML 标签以便全文匹配（CSG 的日期被 <span> 拆分）
     text = re.sub(r'<[^>]+>', ' ', html)
+    # 部分 CMS 会把日期数字拆成相邻文本节点（如“202 6 年 8 月 27 日”）。
+    # 仅合并数字之间的空白，避免有效公告因取不到截止日而绕过时效过滤。
+    text = re.sub(r'(?<=\d)\s+(?=[\d年月日./-])|(?<=[年月日./-])\s+(?=\d)', '', text)
     text = re.sub(r'\s+', ' ', text)
 
     if source_code == "ccgp":
@@ -1790,6 +1797,45 @@ def fetch_js_msa() -> list[dict]:
                       "buyer": "", "region": "江苏海事", "content": ""})
     return items
 
+YJH_PURCHASE_HOME = "https://yjh.jswater.org.cn/"
+YJH_PURCHASE_LIST = "https://yjh.jswater.org.cn/yjh/xxgk/cggg/index.html"
+
+def fetch_yjh_water() -> list[dict]:
+    """江苏省泰州引江河管理处采购公告。
+
+    该站栏目页由 CMS 异步分页渲染，首页仍会静态输出最新采购条目。适配器同时读取
+    管理员配置的专项回填链接，避免首页缓存或异步列表短暂不可用时遗漏重要公告。
+    """
+    cfg = load_config()
+    urls = [YJH_PURCHASE_HOME, YJH_PURCHASE_LIST]
+    urls.extend(str(x).strip() for x in cfg.get("yjh_purchase_seed_urls", []) if str(x).strip())
+    found: dict[str, dict] = {}
+    for page_url in dict.fromkeys(urls):
+        try:
+            html = _http_get(page_url, timeout=20)
+        except Exception:
+            continue
+        for m in re.finditer(r'<a[^>]+href=["\']([^"\']*/yjh/xxgk/cggg/art/20\d{2}/art_[^"\'?]+\.html[^"\']*)["\'][^>]*>(.*?)</a>', html, re.I | re.S):
+            # cid 仅用于前端栏目定位，同一公告的带/不带该参数应视为同一条。
+            url = urljoin(YJH_PURCHASE_HOME, html_mod.unescape(m.group(1))).split("#", 1)[0].split("?", 1)[0]
+            title = _html_to_text(m.group(2))
+            if not title or not any(word in title for word in ("采购", "招标", "询价", "磋商", "竞价")):
+                continue
+            deadline, content = _fetch_detail_full(url, "yjh_water")
+            found[url] = {"source_url": url, "title": title, "buyer": "江苏省泰州引江河管理处",
+                          "region": "江苏省泰州市", "published_at": _extract_published_at_text(content),
+                          "deadline_at": deadline, "content": content}
+        # 专项回填 URL 是详情页，直接形成一条记录。
+        if "/art/20" in page_url:
+            deadline, content = _fetch_detail_full(page_url, "yjh_water")
+            title_match = re.search(r'<title[^>]*>\s*(.*?)\s*</title>', html, re.I | re.S)
+            title = _html_to_text(title_match.group(1)) if title_match else ""
+            if title:
+                found[page_url] = {"source_url": page_url, "title": title, "buyer": "江苏省泰州引江河管理处",
+                                   "region": "江苏省泰州市", "published_at": _extract_published_at_text(content),
+                                   "deadline_at": deadline, "content": content}
+    return list(found.values())
+
 def fetch_zj_msa() -> list[dict]:
     """浙江海事局 — 采购信息栏目（TRS 静态列表，需先跳 /ZJ/ 子站）。"""
     base = "https://www.zj.msa.gov.cn/ZJ/zwgk/gkml/cgxx/"
@@ -2194,6 +2240,7 @@ ADAPTERS: dict[str, callable] = {
     "cj_msa": fetch_cj_msa,
     "sd_msa": fetch_sd_msa,
     "js_msa": fetch_js_msa,
+    "yjh_water": fetch_yjh_water,
     "zj_msa": fetch_zj_msa,
     "hn_msa": fetch_hn_msa,
     "cq_jtw": fetch_cq_jtw,
@@ -2307,7 +2354,7 @@ def fetch_source(conn: sqlite3.Connection, source_code: str) -> tuple[int, int]:
             link_ok = 1
             # 天眼查返回的是手机站深链（带签名参数与防爬校验），HEAD 验证必然失败，跳过验证直接入库；
             # hn_ggzy 是 hash 路由页面；多个政务站点拒绝 HEAD 方法（403），同样跳过。
-            if verify and source_code not in ("tianyancha", "hn_ggzy", "hb_msa", "ln_msa", "hn_msa", "sd_port"):
+            if verify and source_code not in ("tianyancha", "hn_ggzy", "hb_msa", "ln_msa", "hn_msa", "sd_port", "yjh_water"):
                 if not _http_head(item["source_url"], timeout=vtimeout):
                     link_ok = 0
                     print(f"  跳过(链接不可达) | {item['title'][:50]}")
@@ -3001,8 +3048,7 @@ thead th{padding:13px 14px;background:linear-gradient(90deg,#092451,#0b3476);col
             <button class="btn-success" id="fetch-btn" onclick="doFetch()" style="margin-left:auto;background:#67c23a;border:none;color:#fff;padding:8px 18px;border-radius:4px;cursor:pointer;font-size:14px">获取最新数据</button>
           </div>
           <div class="sub-tabs" style="margin-bottom:14px">
-            <button class="sub-tab active" data-market-tab="direct" onclick="switchMarketTab('direct',this)">直接商机 <span id="direct-tab-count">0</span></button>
-            <button class="sub-tab" data-market-tab="market" onclick="switchMarketTab('market',this)">市场情报 <span id="market-tab-count">0</span></button>
+            <button class="sub-tab active" data-market-tab="direct" onclick="switchMarketTab('direct',this)">商机列表 <span id="direct-tab-count">0</span></button>
           </div>
           <div class="tcard-list" id="rows"></div>
           <div class="pagination" id="pagination"></div>
@@ -3393,7 +3439,7 @@ function ensureAiReviewFrame(){let frame=document.getElementById('ai-review-fram
 async function loadStats(){
   let s=await api('/api/stats');
   document.querySelector('#direct-tab-count').textContent=`(${Number(s.direct||0)})`;
-  document.querySelector('#market-tab-count').textContent=`(${Number(s.market||0)})`;
+  const marketCount=document.querySelector('#market-tab-count');if(marketCount)marketCount.textContent=`(${Number(s.market||0)})`;
   let stats=document.querySelector('#stats'); if(!stats)return;
   stats.innerHTML=`
     <div class="stat-card"><div class="stat-num">${s.total}</div><div class="stat-label">有效公告</div></div>
