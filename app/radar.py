@@ -302,18 +302,20 @@ def ai_review_bucket_ids(bucket: str) -> set[int] | None:
     """读取 AI 后台分流结果。无 AI 库时返回 None，保留传统列表行为。"""
     if not AI_REVIEW_DB.exists():
         return None
-    status_map = {
-        # AI 排除才从实时商机移出；其余结论统一作为可由用户自行处置的实时商机。
-        "direct": ("direct_opportunity", "market_intelligence", "approved", "approved_manual", "manual_review"),
-        "market": (),
-    }
-    statuses = status_map.get(bucket, ())
-    if not statuses:
-        return set()
     try:
         review_conn = sqlite3.connect(f"file:{AI_REVIEW_DB}?mode=ro", uri=True)
+        # 审批通过的公告按 AI 判断的业务桶回到实时页。两个桶的并集与
+        # “AI 审批通过”完全一致；AI 排除和已过期记录绝不进入实时页。
+        bucket_map = {"direct": "direct_opportunity", "market": "market_intelligence"}
+        expected_bucket = bucket_map.get(bucket)
+        if not expected_bucket:
+            review_conn.close()
+            return set()
         marks = {int(r[0]) for r in review_conn.execute(
-            f"SELECT source_tender_id FROM reviews WHERE ai_status IN ({','.join('?' for _ in statuses)})", statuses
+            """SELECT source_tender_id FROM reviews
+               WHERE ai_status IN ('approved','approved_manual')
+                 AND (bucket=? OR (bucket='' AND ai_status=?))""",
+            (expected_bucket, expected_bucket),
         ).fetchall()}
         review_conn.close()
         return marks
@@ -981,6 +983,19 @@ def _http_head(url: str, timeout: int = 8) -> bool:
         return resp.status < 400
     except HTTPError as e:
         return e.code < 400
+    except Exception:
+        return False
+
+def _http_link_reachable(url: str, timeout: int = 8) -> bool:
+    """优先 HEAD，遇到拒绝 HEAD 的政务站点时以轻量 GET 再确认，避免误丢公告。"""
+    if _http_head(url, timeout):
+        return True
+    try:
+        req = Request(url, headers={**_HTTP_HEADERS, "Range": "bytes=0-1024"}, method="GET")
+        resp = urlopen(req, timeout=timeout, context=_make_ssl_context())
+        return resp.status < 400
+    except HTTPError as exc:
+        return exc.code < 400
     except Exception:
         return False
 
@@ -2354,8 +2369,8 @@ def fetch_source(conn: sqlite3.Connection, source_code: str) -> tuple[int, int]:
             link_ok = 1
             # 天眼查返回的是手机站深链（带签名参数与防爬校验），HEAD 验证必然失败，跳过验证直接入库；
             # hn_ggzy 是 hash 路由页面；多个政务站点拒绝 HEAD 方法（403），同样跳过。
-            if verify and source_code not in ("tianyancha", "hn_ggzy", "hb_msa", "ln_msa", "hn_msa", "sd_port", "yjh_water"):
-                if not _http_head(item["source_url"], timeout=vtimeout):
+            if verify and source_code not in ("tianyancha", "hn_ggzy", "hb_msa", "ln_msa", "hn_msa", "sd_port"):
+                if not _http_link_reachable(item["source_url"], timeout=vtimeout):
                     link_ok = 0
                     print(f"  跳过(链接不可达) | {item['title'][:50]}")
                     skipped += 1
@@ -3048,7 +3063,8 @@ thead th{padding:13px 14px;background:linear-gradient(90deg,#092451,#0b3476);col
             <button class="btn-success" id="fetch-btn" onclick="doFetch()" style="margin-left:auto;background:#67c23a;border:none;color:#fff;padding:8px 18px;border-radius:4px;cursor:pointer;font-size:14px">获取最新数据</button>
           </div>
           <div class="sub-tabs" style="margin-bottom:14px">
-            <button class="sub-tab active" data-market-tab="direct" onclick="switchMarketTab('direct',this)">商机列表 <span id="direct-tab-count">0</span></button>
+            <button class="sub-tab active" data-market-tab="direct" onclick="switchMarketTab('direct',this)">直接商机 <span id="direct-tab-count">0</span></button>
+            <button class="sub-tab" data-market-tab="market" onclick="switchMarketTab('market',this)">市场情报 <span id="market-tab-count">0</span></button>
           </div>
           <div class="tcard-list" id="rows"></div>
           <div class="pagination" id="pagination"></div>
@@ -4115,8 +4131,10 @@ def make_handler(db_path: Path):
                     # visible = non-expired, non-deleted records
                     del_filter = "AND is_deleted = 0 AND followup_status != 'expired'"
                     direct_ids = ai_review_bucket_ids("direct")
-                    ai_filter = f"AND id IN ({','.join('?' for _ in direct_ids)})" if direct_ids is not None else ""
-                    stat_params = exp_params + sorted(direct_ids or ())
+                    market_ids = ai_review_bucket_ids("market")
+                    visible_ids = None if direct_ids is None or market_ids is None else direct_ids | market_ids
+                    ai_filter = f"AND id IN ({','.join('?' for _ in visible_ids)})" if visible_ids is not None else ""
+                    stat_params = exp_params + sorted(visible_ids or ())
                     total_vis = conn.execute(f"SELECT count(*) FROM tenders WHERE 1=1 {exp_where} {del_filter} {ai_filter}", stat_params).fetchone()[0]
                     # by priority (only among visible records)
                     key_cnt = conn.execute(f"SELECT count(*) FROM tenders WHERE priority='重点关注' {exp_where} {del_filter} {ai_filter}", stat_params).fetchone()[0]

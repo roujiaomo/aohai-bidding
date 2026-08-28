@@ -178,6 +178,27 @@ def tender_has_passed_deadline(record: dict | sqlite3.Row) -> bool:
             return True
     return False
 
+def source_auto_expire_days() -> int:
+    """从雷达配置读取实时页窗口，避免两个服务各自维护一套时效规则。"""
+    try:
+        config_path = SOURCE_DB.parent.parent / "config.json"
+        return max(1, int(json.loads(config_path.read_text(encoding="utf-8")).get("auto_expire_days", 30)))
+    except Exception:
+        return 30
+
+def tender_is_current(record: dict | sqlite3.Row) -> bool:
+    """与雷达实时页共用时效：截止已过，或无截止日且发布日期超出配置窗口，均归档。"""
+    if tender_has_passed_deadline(record):
+        return False
+    published = str(record["published_at"] or "")
+    match = re.search(r"(20\d{2})[-/年.](\d{1,2})[-/月.](\d{1,2})", published)
+    if not match:
+        return True
+    try:
+        return dt.date(int(match.group(1)), int(match.group(2)), int(match.group(3))) + dt.timedelta(days=source_auto_expire_days()) >= dt.date.today()
+    except ValueError:
+        return True
+
 def conn() -> sqlite3.Connection:
     DB.parent.mkdir(parents=True, exist_ok=True); c = sqlite3.connect(DB); c.row_factory = sqlite3.Row
     c.executescript(SCHEMA)
@@ -205,9 +226,11 @@ def backfill_human_cases(c: sqlite3.Connection) -> None:
 def sync_candidates() -> int:
     conf = cfg(); minimum = int(conf["min_score"])
     src = sqlite3.connect(f"file:{SOURCE_DB}?mode=ro", uri=True); src.row_factory = sqlite3.Row
-    data = src.execute("""SELECT id,title,buyer,region,budget,published_at,deadline_at,source_url,content,score,priority,updated_at
+    raw_data = src.execute("""SELECT id,title,buyer,region,budget,published_at,deadline_at,source_url,content,score,priority,updated_at
       FROM tenders WHERE score>=? AND is_deleted=0 AND followup_status!='expired'
       AND NOT (source_code LIKE '%tianyancha%' AND source_url LIKE '%sp.iccec.cn/viewNoticeDetail%')""", (minimum,)).fetchall(); src.close()
+    # 只有实时页也会展示的记录才保持为有效 AI 记录，确保 AI 通过与实时商机一对一。
+    data = [x for x in raw_data if tender_is_current(x)]
     c = conn(); stamp = now(); active_count = 0
     # 评审库只能是商机库的派生数据：源公告被移入回收站、降到候选阈值以下，
     # 或标记为过期后，旧 AI 结论也必须立即归档，不能继续出现在待人工/推荐页。
@@ -219,21 +242,15 @@ def sync_candidates() -> int:
             f"""UPDATE reviews
                 SET ai_status='expired', ai_label='已移出商机库',
                     error='源公告已移出商机库或不再满足候选条件', synced_at=?
-                WHERE ai_status!='expired' AND source_tender_id NOT IN ({placeholders})""",
+                WHERE ai_status NOT IN ('expired','exclude') AND source_tender_id NOT IN ({placeholders})""",
             [stamp, *source_ids],
         )
     else:
         c.execute("""UPDATE reviews
             SET ai_status='expired', ai_label='已移出商机库',
                 error='源公告已移出商机库或不再满足候选条件', synced_at=?
-            WHERE ai_status!='expired'""", (stamp,))
+            WHERE ai_status NOT IN ('expired','exclude')""", (stamp,))
     for x in data:
-        if tender_has_passed_deadline(x):
-            # 旧记录也同步截止日，但明确标注为已过期，不送给 DeepSeek。
-            c.execute("""INSERT INTO reviews(source_tender_id,title,buyer,region,budget,published_at,deadline_at,source_url,content,keyword_score,source_priority,source_updated_at,synced_at,ai_status,ai_label)
-              VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'expired','已过截止日期') ON CONFLICT(source_tender_id) DO UPDATE SET deadline_at=excluded.deadline_at,source_updated_at=excluded.source_updated_at,synced_at=excluded.synced_at,ai_status=CASE WHEN reviews.ai_status IN ('approved_manual','rejected_manual') THEN reviews.ai_status ELSE 'expired' END,ai_label=CASE WHEN reviews.ai_status IN ('approved_manual','rejected_manual') THEN reviews.ai_label ELSE '已过截止日期' END""",
-              (x["id"],x["title"],x["buyer"],x["region"],x["budget"],x["published_at"],x["deadline_at"],x["source_url"],x["content"],x["score"],x["priority"],x["updated_at"],stamp))
-            continue
         active_count += 1
         c.execute("""INSERT INTO reviews(source_tender_id,title,buyer,region,budget,published_at,deadline_at,source_url,content,keyword_score,source_priority,source_updated_at,synced_at)
           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(source_tender_id) DO UPDATE SET title=excluded.title,buyer=excluded.buyer,region=excluded.region,budget=excluded.budget,published_at=excluded.published_at,deadline_at=excluded.deadline_at,source_url=excluded.source_url,content=excluded.content,keyword_score=excluded.keyword_score,source_priority=excluded.source_priority,source_updated_at=excluded.source_updated_at,synced_at=excluded.synced_at""",
@@ -629,6 +646,30 @@ HTML += r'''<script>
   };
 })();
 </script>'''
+
+# 最终渲染页面：此前页面经过多次字符串追加/替换，旧脚本仍会先绘制费用卡与旧布局再被覆盖。
+# 使用单一模板，避免闪烁，并让接口、分页和两条评审工作流一一对应。
+HTML = r'''<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>AI评审</title>
+<style>
+:root{--blue:#176bd2;--ink:#173b75;--muted:#73839a;--line:#dfebf6;--bg:#f5f8fc}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:#344d69;font:14px "Microsoft YaHei",system-ui,sans-serif}.wrap{max-width:1460px;margin:auto;padding:18px}.head{display:flex;align-items:center;gap:12px;margin-bottom:14px}.head h2{margin:0;color:var(--ink);font-size:18px}.sub{color:var(--muted)}.tabs{display:flex;gap:8px;margin-left:auto}.tabs button,.btn{border:0;border-radius:7px;padding:8px 13px;font-weight:700;cursor:pointer}.tabs button{background:#eaf2fc;color:#2764a5}.tabs button.on,.btn{background:#176bd2;color:#fff}.btn.pass{background:#159562}.btn.reject{background:#df5867}.btn.gray{background:#edf3fa;color:#496580}.page{display:none}.page.on{display:block}.panel,.card{background:#fff;border:1px solid var(--line);border-radius:10px;box-shadow:0 2px 9px #183f7010}.panel{padding:14px;margin-bottom:12px}.toolbar{display:flex;gap:9px;align-items:center;flex-wrap:wrap}.hint{color:var(--muted);font-size:13px}.stats{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-top:12px}.stat{padding:12px;border:1px solid #e5eef8;border-radius:8px;background:#f8fbff}.num{font-size:24px;font-weight:700;color:var(--blue)}.label{margin-top:3px;color:var(--muted)}.state-tabs{display:flex;gap:8px;margin:8px 0 10px;border-bottom:1px solid var(--line)}.state-tabs button{border:0;background:transparent;color:#687e98;padding:9px 13px;cursor:pointer;font-weight:700;border-bottom:3px solid transparent}.state-tabs button.on{color:var(--blue);border-bottom-color:var(--blue)}.count{display:inline-block;min-width:20px;padding:1px 6px;border-radius:99px;background:#eaf3ff;color:#176bd2;font-size:12px}#records{display:block}.card{padding:14px 16px;margin:10px 0;border-left:4px solid #4c94e7}.card.exclude{border-left-color:#d58d25}.title{display:inline-block;max-width:100%;color:var(--ink);font-size:15px;font-weight:700;text-decoration:none;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.title:hover{text-decoration:underline}.meta{margin:7px 0;color:var(--muted);font-size:13px}.review-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px}.review-box{padding:10px 12px;border:1px solid #e2ecf7;border-radius:8px;background:#f6faff;line-height:1.7}.review-box b{display:block;margin-bottom:4px;color:var(--ink)}.review-box.exclude-reason{background:#fff8eb;border-left:3px solid #efa42b}.review-box.exclude-reason b{color:#b6760e}.review-box.confirm{background:#fff8eb;border-left:3px solid #efa42b}.review-box.match{border-left:3px solid #4a94e6}.review-box ol{margin:0;padding-left:20px}.actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:10px}.note{min-width:260px;flex:1;padding:8px 10px;border:1px solid #cfdeec;border-radius:6px}.evidence{margin-top:9px}.evidence summary{cursor:pointer;color:#55718e;font-size:13px}.evidence div{margin-top:6px;padding:8px 10px;background:#f7faff;border-left:3px solid #8ebce9;border-radius:6px;color:#57718c}.pager{display:flex;justify-content:center;align-items:center;gap:10px;padding:13px;color:var(--muted)}.pager button:disabled{opacity:.45;cursor:not-allowed}.empty{padding:32px;text-align:center;color:var(--muted)}.setting{display:grid;grid-template-columns:220px 1fr;gap:12px;padding:10px 0;border-bottom:1px dashed var(--line)}.setting input{padding:7px 9px;border:1px solid #cfddeb;border-radius:6px;max-width:360px}.loading{position:fixed;left:0;top:0;width:100%;height:3px;background:transparent;z-index:99}.loading.on:before{content:'';display:block;width:55%;height:3px;background:linear-gradient(90deg,#277de7,#72b8ff);animation:move 1.1s infinite}@keyframes move{from{transform:translateX(-110%)}to{transform:translateX(190%)}}@media(max-width:760px){.wrap{padding:12px}.head{flex-wrap:wrap}.tabs{margin-left:0}.review-grid,.setting{grid-template-columns:1fr}.note{min-width:100%}}
+</style><main class="wrap"><div class="head"><h2>AI评审</h2><span class="sub">AI 排除项复核；其余有效商机直接进入实时商机</span><div class="tabs"><button class="on" onclick="showPage('review',this)">评审记录</button><button onclick="showPage('config',this)">评审配置</button><button onclick="showPage('learning',this)">人工样本库</button></div></div><section id="review" class="page on"><div class="panel"><div class="toolbar"><button class="btn" onclick="runReview()">评审待处理商机</button><span id="hint" class="hint"></span></div><div id="stats" class="stats"></div></div><div id="stateTabs" class="state-tabs"></div><div id="records"></div><div id="pager" class="pager"></div></section><section id="config" class="page"><div class="panel"><h3>评审配置</h3><div id="form"></div><button class="btn" onclick="saveConfig()">保存配置</button></div></section><section id="learning" class="page"><div class="panel"><h3>人工样本库</h3><div id="learning" class="hint">加载中…</div></div></section></main><div id="loading" class="loading"></div>
+<script>
+const A=(url,opt)=>fetch(url,opt).then(async r=>{let x;try{x=await r.json()}catch(_){throw Error('服务返回异常')}if(!r.ok)throw Error(x.error||'请求失败');return x});
+const esc=s=>String(s||'').replace(/[&<>]/g,x=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[x]));let state={list:'approved',page:1,pageSize:12,total:0,stats:null,config:null};
+const loading=(on)=>document.getElementById('loading').classList.toggle('on',on);function showPage(id,el){document.querySelectorAll('.page').forEach(x=>x.classList.toggle('on',x.id===id));document.querySelectorAll('.tabs button').forEach(x=>x.classList.toggle('on',x===el))}
+const split=v=>String(v||'').split(/[；;。]\s*/).map(x=>x.trim()).filter(Boolean);const list=v=>`<ol>${split(v).slice(0,6).map(x=>`<li>${esc(x)}</li>`).join('')}</ol>`;
+function reasonData(row){try{return JSON.parse(row.ai_reason_json||'{}')}catch(_){return {}}}function evidenceData(row){try{return JSON.parse(row.ai_evidence_json||'[]')}catch(_){return []}}
+function renderTabs(){const s=state.stats||{};stateTabs.innerHTML=`<button class="${state.list==='approved'?'on':''}" onclick="changeList('approved')">AI 审批通过 <span class=count>${(s.approved||0)+(s.approved_manual||0)}</span></button><button class="${state.list==='exclude'?'on':''}" onclick="changeList('exclude')">AI 排除 <span class=count>${s.exclude||0}</span></button>`}
+function card(row){const q=reasonData(row),ev=evidenceData(row),excluded=row.ai_status==='exclude';const reasons=(excluded?q.exclude_reason:'')||(q.reasons||[]).join('；')||row.error||'未提供理由';const project=`${row.buyer||'未提供采购方'} · ${row.region||'未提供地区'} · 关键词评分 ${row.keyword_score||0}${row.deadline_at?' · 截止 '+row.deadline_at:''}`;const left=excluded?`<section class="review-box match"><b>项目摘要</b>${esc(project)}</section>`:`<section class="review-box match"><b>匹配判断</b>${list(reasons)}<b>能力命中</b>${list((q.matched_capabilities||[]).join('；')||'未提供')}</section>`;const right=excluded?`<section class="review-box exclude-reason"><b>排除理由</b>${list(reasons)}</section>`:`<section class="review-box confirm"><b>人工确认事项</b>${list((q.risk_notes||q.missing_information||[]).join('；')||'无')}</section>`;const actions=excluded||row.ai_status==='approved'?`<div class="actions"><input id="note-${row.id}" class="note" placeholder="${excluded?'复核说明；确认排除时请填写':'审批说明；人工不通过时必须填写原因'}"><button class="btn pass" onclick="manual(${row.id},'approved')">${excluded?'改为通过，进入实时商机':'人工通过，进入商机列表'}</button><button class="btn reject" onclick="manual(${row.id},'rejected')">${excluded?'确认排除':'人工不通过'}</button></div>`:'';return `<article class="card ${excluded?'exclude':'approved'}"><a class="title" href="${esc(row.source_url||'#')}" target="_blank" rel="noopener">${esc(row.title)}</a><div class="meta">${esc(project)}</div><div class="review-grid">${left}${right}</div>${ev.length?`<details class="evidence"><summary>查看公告原文依据</summary>${ev.map(x=>`<div><b>${esc(x.field||'公告原文')}：</b>${esc(x.quote||'')}</div>`).join('')}</details>`:''}${actions}</article>`}
+function renderRows(rows){records.innerHTML=rows.map(card).join('')||'<div class="panel empty">该分类暂无有效记录。</div>';const pages=Math.max(1,Math.ceil(state.total/state.pageSize));pager.innerHTML=pages>1?`<button class="btn gray" ${state.page<=1?'disabled':''} onclick="loadRows(${state.page-1})">上一页</button><span>第 ${state.page} / ${pages} 页，共 ${state.total} 条</span><button class="btn gray" ${state.page>=pages?'disabled':''} onclick="loadRows(${state.page+1})">下一页</button>`:''}
+async function loadRows(page=1){loading(true);try{const [s,r]=await Promise.all([A('api/stats'),A(`api/records?list=${state.list}&page=${page}&page_size=${state.pageSize}`)]);state.stats=s;state.page=r.page;state.total=r.total;state.pageSize=r.page_size;hint.textContent='AI 排除仅供复核；AI 审批通过的有效公告与实时商机一一对应。';stats.innerHTML=`<div class=stat><div class=num>${s.total||0}</div><div class=label>有效评审记录</div></div><div class=stat><div class=num>${(s.approved||0)+(s.approved_manual||0)}</div><div class=label>可进入实时商机</div></div>`;renderTabs();renderRows(r.rows||[])}catch(e){records.innerHTML=`<div class="panel empty">加载失败：${esc(e.message)}</div>`}finally{loading(false)}}
+function changeList(list){state.list=list;loadRows(1)}async function manual(id,decision){const note=(document.getElementById('note-'+id)?.value||'').trim();if(decision==='rejected'&&!note){alert('人工不通过必须填写原因。');return}loading(true);try{await A(`api/records/${id}/manual`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({decision,note})});await loadRows(state.page)}catch(e){alert(e.message)}finally{loading(false)}}async function runReview(){loading(true);try{let r=await A('api/analyze',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({limit:100})});alert(`完成 ${r.processed} 条，失败 ${r.failed||0} 条`);await loadRows(1)}catch(e){alert(e.message)}finally{loading(false)}}
+async function loadConfig(){try{state.config=await A('api/config');form.innerHTML=Object.entries(state.config).filter(([k])=>!['today_cost'].includes(k)).map(([k,v])=>`<div class=setting><b>${esc(k)}</b><input data-k="${esc(k)}" value="${esc(v)}"></div>`).join('');const l=await A('api/learning');learning.textContent=`已沉淀 ${l.human_decisions||0} 条人工结论。`}catch(e){form.textContent=e.message}}async function saveConfig(){const x={...state.config};document.querySelectorAll('[data-k]').forEach(e=>x[e.dataset.k]=e.value);for(const k of ['enabled','auto_analyze'])if(k in x)x[k]=String(x[k]).toLowerCase()==='true';for(const k of ['min_score','daily_limit','content_limit','max_output_tokens'])if(k in x)x[k]=+x[k];if('daily_budget_usd' in x)x.daily_budget_usd=+x.daily_budget_usd;await A('api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(x)});alert('已保存')}loadRows();loadConfig();
+</script>'''
+
+# 模板的页面区块和内容容器不能复用同一 id；否则浏览器的全局 id 变量会指向区块本身。
+HTML = HTML.replace('<div id="learning" class="hint">加载中…</div>', '<div id="learningBody" class="hint">加载中…</div>')
+HTML = HTML.replace('learning.textContent=', 'learningBody.textContent=')
 
 class Handler(BaseHTTPRequestHandler):
     def log_message(self,*a): pass
