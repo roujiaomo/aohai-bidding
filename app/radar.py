@@ -186,6 +186,13 @@ CREATE TABLE IF NOT EXISTS sources (
   access_mode TEXT NOT NULL, status TEXT NOT NULL, notes TEXT NOT NULL,
   last_checked_at TEXT, last_success_at TEXT, last_error TEXT
 );
+CREATE TABLE IF NOT EXISTS fetch_runs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  source_code TEXT NOT NULL, started_at TEXT NOT NULL, finished_at TEXT NOT NULL,
+  status TEXT NOT NULL, returned_count INTEGER DEFAULT 0, created_count INTEGER DEFAULT 0,
+  updated_count INTEGER DEFAULT 0, skipped_count INTEGER DEFAULT 0, error TEXT DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_fetch_runs_source_time ON fetch_runs(source_code, id DESC);
 CREATE TABLE IF NOT EXISTS tenders (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   fingerprint TEXT NOT NULL UNIQUE, source_code TEXT NOT NULL,
@@ -1577,7 +1584,7 @@ def fetch_ceb() -> list[dict]:
         if not html:
             e = last_error
             print(f"  [ceb] 第 {page} 页获取失败: {e}")
-            break
+            raise RuntimeError(f"CEB 第 {page} 页连续重试失败：{e}")
         # 每行: <td name="imgShow" id="时间戳"> <a href="urlOpen('UUID')" title="标题"> ...
         # <span title="行业"> ... <span title="地区"> ... <td>日期</td> ... <td name="openTime" id="开标时间">
         row_pat = re.compile(
@@ -2376,8 +2383,16 @@ def fetch_source(conn: sqlite3.Connection, source_code: str) -> tuple[int, int]:
     if not adapter:
         raise ValueError(f"来源 {source_code} 没有已实现的适配器")
     cfg = load_config()
-    items = adapter()
     stamp = now()
+    try:
+        items = adapter()
+    except Exception as exc:
+        message = str(exc)[:1000]
+        conn.execute("UPDATE sources SET last_checked_at=?,last_error=? WHERE code=?", (stamp, message, source_code))
+        conn.execute("INSERT INTO fetch_runs(source_code,started_at,finished_at,status,error) VALUES(?,?,?,?,?)",
+                     (source_code, stamp, now(), "failed", message))
+        conn.commit()
+        raise
     created, updated, skipped = 0, 0, 0
     verify = cfg.get("verify_links", True)
     vtimeout = cfg.get("verify_link_timeout", 8)
@@ -2453,6 +2468,9 @@ def fetch_source(conn: sqlite3.Connection, source_code: str) -> tuple[int, int]:
         "UPDATE sources SET status='connected', last_checked_at=?, last_success_at=?, last_error=NULL WHERE code=?",
         (stamp, stamp, source_code),
     )
+    conn.execute("""INSERT INTO fetch_runs(source_code,started_at,finished_at,status,returned_count,created_count,updated_count,skipped_count)
+                    VALUES(?,?,?,?,?,?,?,?)""",
+                 (source_code, stamp, now(), "success", len(items), created, updated, skipped))
     conn.commit()
     return created, updated, skipped
 
@@ -2494,7 +2512,7 @@ a:hover{color:#66b1ff}
   flex-shrink:0;
 }
 .sidebar-brand span{color:#409eff;margin-right:6px;font-size:1.1rem}
-.sidebar-nav{padding:8px 0;flex:1;min-height:0;overflow-y:auto}.sidebar-bottom{padding:8px 0 14px;border-top:1px solid rgba(255,255,255,.12);flex-shrink:0;margin-top:auto}
+.sidebar-nav{padding:8px 0 84px;flex:1;min-height:0;overflow-y:auto}.sidebar-bottom{position:absolute;left:0;right:0;bottom:0;padding:8px 0 14px;border-top:1px solid rgba(255,255,255,.12);flex-shrink:0;background:#001529;z-index:1}
 .nav-group-title{
   padding:12px 16px 6px;
   font-size:.72rem;color:rgba(255,255,255,.35);
@@ -2954,7 +2972,7 @@ a{color:var(--blue-600)}a:hover{color:var(--blue-800)}
 .sidebar{width:224px;background:linear-gradient(180deg,var(--blue-900),#0a3577 100%);box-shadow:7px 0 24px rgba(7,29,73,.14)}
 .sidebar-brand{height:68px;padding:0 20px;font-size:1.04rem;border-bottom-color:rgba(255,255,255,.12);letter-spacing:.04em}
 .sidebar-brand span{color:#71b4ff;text-shadow:0 0 16px rgba(113,180,255,.7)}
-.sidebar-nav{padding:14px 0}.sidebar-bottom{padding:12px 0 16px;border-top-color:rgba(210,228,255,.16)}.nav-group-title{padding:10px 20px 8px;color:rgba(210,228,255,.48);font-size:.7rem}
+.sidebar-nav{padding:14px 0 88px}.sidebar-bottom{padding:12px 0 16px;border-top-color:rgba(210,228,255,.16);background:#0a3577}.nav-group-title{padding:10px 20px 8px;color:rgba(210,228,255,.48);font-size:.7rem}
 .nav-item{margin:3px 12px;padding:11px 13px;border-left:0;border-radius:8px;color:rgba(229,240,255,.75);gap:10px}
 .nav-item:hover{background:rgba(124,184,255,.12);color:#fff}.nav-item.active{background:linear-gradient(90deg,rgba(59,139,244,.48),rgba(93,167,255,.15));border-left:0;box-shadow:inset 3px 0 #8cc6ff;color:#fff}.ai-review-count{margin-left:auto;min-width:19px;padding:1px 6px;text-align:center;border-radius:99px;background:#e89a28;color:#fff;font-size:.72rem;font-weight:700}.ai-review-count.zero{display:none}
 .main{margin-left:224px}.topbar{height:68px;padding:0 30px;background:rgba(255,255,255,.9);backdrop-filter:blur(12px);border-bottom-color:var(--line);box-shadow:0 2px 14px rgba(23,57,112,.04)}
