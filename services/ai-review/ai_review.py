@@ -23,7 +23,7 @@ LOCK = threading.Lock()
 DEFAULT_CONFIG = {
     "enabled": True, "mode": "shadow", "min_score": 1, "daily_limit": 100,
     "daily_budget_usd": 0.10, "content_limit": 3000, "model": "deepseek-v4-flash",
-    "max_output_tokens": 700, "profile_version": "aohai-v4", "auto_analyze": False,
+    "max_output_tokens": 700, "profile_version": "aohai-v5", "auto_analyze": False,
     # 默认宽松：把“有海事相关性但仍需核实”的项目交给人工，而非直接排除。
     "review_strictness": "loose",
 }
@@ -44,7 +44,7 @@ CAPABILITY_PROFILE = """遨海科技能力档案 aohai-v3（用户提供的全�
 3. 遨海云/MISS岸基信息服务：AY-XA AIS大数据系统、船舶远程监控管理、通航安全自主监控、智慧渔港、海洋牧场监控、港航调度与海事监管平台。采购对象明确为AIS/VDES数据、船舶态势、电子围栏、轨迹回放、海上通信导航信息化、渔船/渔港监管、海洋牧场/海上风电/油气平台通航安全平台时，可优先 approved。
 4. 服务：方案设计、设备部署、调试、运维、软件升级、数据服务；可考虑系统集成和电子智能化实施。公司档案称具“电子与智能化工程专业承包二级资质”，但具体项目的资质类别、有效期、地域、业绩、保密和联合体要求必须逐条核实，不能仅凭此自动认定资格满足。
 【宽松档位决策】采购内容与上述任一具体产品/平台/服务直接对应，且未出现明确排除或不可竞争事实时，decision=approved、标签=AI推荐；资格、制造商授权、业绩、联合体、保密、技术细节不足应写入 missing_information，而非仅因不确定就转人工。应优先捕捉海事、航保、港航、内河、渔业、海洋牧场、海上风电/油气、船队管理等场景中有明确通信导航/数据平台采购内容的商机。
-【边界项目】航标灯器、普通LED灯具及其施工维护；只有雷达/CCTV/北斗/VHF单品的采购；完整VTS/智慧航道/智慧船闸总包而未明确遨海产品清单；泛化低轨卫星信号监测分析、卫星平台总装/发射；工程总承包、施工、设计、监理、疏浚、劳务；要求特定军工资质、特定同类业绩或明确必须联合体的项目。应严格依据公告原文判定业务价值，不能臆测参与资格。
+【集成合作机会】仍在公开招标、询比、谈判或可报名阶段的智慧航道、VTS、智慧船闸、智慧港口、智慧海洋、航海保障、港航监管集成项目，只要原文明确出现船舶信息、通航安全、通信导航、航标遥测、调度监管或海洋数据平台等具体业务范围，即可作为“集成合作机会”推荐进入直接商机；技术清单、资质、业绩、联合体和独立供货方式未知时，写入待确认项，不能仅因此降为市场情报。航标灯器、普通LED灯具及其施工维护；只有雷达/CCTV/北斗/VHF单品的采购；泛化低轨卫星信号监测分析、卫星平台总装/发射；工程总承包、施工、设计、监理、疏浚、劳务仍需严格依据原文判定，不能臆测参与资格。
 【明确排除】AIS=空气绝缘开关设备（开关柜、变电、输配电、电网）；普通LED照明、无海事通信导航关联的电子元件；保险、培训、会议；施工监理、疏浚养护等非电子智能化交付。成交/中标结果如业务相关，应作为市场情报而非直接排除。
 【证据纪律】BSH认证、专利、软著、标准参与、新闻报道可增强技术可信度，但不能推断公司具备未列出的硬件供货能力、所有工程资质或所有低轨监测业绩。AIS一词必须结合海事场景与采购对象判断，绝不能单独作为依据。"""
 
@@ -54,8 +54,8 @@ CANONICAL_CAPABILITIES = (
     "船舶远程监控", "通航安全监控平台", "智慧渔港监管", "海洋牧场监控", "港航海事监管平台",
 )
 POLICY_VIEW = {
-    "direct": ["VDES岸基站、船载终端、卫星载荷、核心网", "ECDIS/INS与船舶导航集成", "AIS大数据、远程监控、通航安全、港航海事监管平台", "智慧渔港、海洋牧场及明确含通信导航内容的海洋工程平台"],
-    "manual": ["航标/LED灯器及施工维护", "仅雷达、CCTV、北斗、VHF单品", "未明确产品清单的VTS、智慧航道或智慧船闸总包", "低轨监测、卫星总装、特殊资质/业绩/联合体要求"],
+    "direct": ["明确产品：VDES岸基站、船载终端、AIS航标、遥测遥控、ECDIS/INS、AIS数据与监管平台", "集成合作：仍可报名的智慧航道、VTS、智慧港口/海洋项目，且原文明确通信导航、通航安全、船舶信息或数据平台范围", "资格、业绩、授权、联合体和技术细节不全时保留直接商机，并标为待确认"],
+    "manual": ["航标/LED灯器及施工维护", "仅雷达、CCTV、北斗、VHF单品", "低轨监测、卫星总装、特殊资质/业绩/联合体要求"],
     "exclude": ["电力AIS开关设备", "普通照明、保险、培训、会议", "施工监理、疏浚养护等非电子智能化交付", "成交结果或已指定供应商、无竞争机会项目"],
 }
 
@@ -282,11 +282,20 @@ def prompt_for(r: dict, conf: dict) -> str:
 人工审阅沉淀的校准规则（由管理员人工确认后写入；辅助判断；不得覆盖能力档案中的明确排除项）：{learned_text}
 【强制排除】招聘/录用、废标/流标/终止/暂停/作废、合同/验收、环评公示；电力行业 AIS（空气绝缘开关设备、变电、电网、开关柜）；普通 LED、普通电子元件、保险、培训、会议、劳务；无海事通信、导航、船舶信息、通航安全或港航监管实质关联的采购。单独出现 AIS、卫星、海洋、港口、船舶、智慧港口等词，不足以证明适配。
 【项目类型】project_type 只能是 direct_product（明确采购遨海对应产品/软件/服务）、integration_project（智慧航道、VTS、港航监管等集成项目）、early_stage（可研/勘察/设计咨询/规划）或 other。
-【业务价值】bucket 只能是 direct_opportunity、market_intelligence、exclude。direct_opportunity 必须同时具备：公告原文证实采购/参与尚未结束或仍有独立供货、分包、合作采购入口；以及原文证实采购对象与遨海能力直接匹配。market_intelligence 用于业务相关但当前没有原文证实参与入口的中标、成交、候选人结果、已关闭项目和市场线索。中标/成交结果不得仅因“结果”身份排除；如原文未明确后续参与入口，归 market_intelligence。不能因为项目是集成项目或理论上可做供应商，就判为 direct_opportunity。supplier_lead=true 仅表示可关注获奖单位或采购方，不改变 market_intelligence 分类。exclude 用于明确无关或命中强制排除。
-【证据纪律】每项关键判断都必须有公告原文短句。没有原文证据时必须采用更保守分类，不得写“可参与”“可供货”“具备资质”。资格、授权、业绩、保密、联合体等不确定项仅写入 risk_notes。
+【业务价值】bucket 只能是 direct_opportunity、market_intelligence、exclude。direct_opportunity 是“当前可销售跟进的机会”，必须有未结束的公开招标、询比、谈判、报名、投标递交或其他参与入口证据，并满足下列任一类：A. direct_product：原文明确采购遨海对应产品、软件或服务；B. integration_project：原文明确是智慧航道、VTS、智慧船闸、智慧港口、智慧海洋、航海保障或港航监管项目，且至少出现船舶信息、通航安全、通信导航、航标遥测、船岸通信、调度监管或海洋数据平台等具体业务范围。集成合作项目不要求已经公开到产品型号或完整技术清单；技术细节、资质、业绩、授权、联合体、独立供货方式未知时写入 risk_notes，并保留 direct_opportunity。market_intelligence 仅用于中标/成交/候选人结果、已关闭项目、可研设计规划、无有效参与入口的答疑澄清，或仅有泛化“智慧/海洋/港口”词但没有具体业务范围的线索。supplier_lead=true 仅表示可关注获奖单位或采购方，不改变 market_intelligence 分类。exclude 用于明确无关或命中强制排除。
+【证据纪律】每项关键判断都必须有公告原文短句。采购项目名称、品目、采购需求、技术参数、采购方式、报名/投标时间、项目阶段等任一恰当字段均可作为证据，不得因字段名称不同否定有效证据。没有原文证据时必须采用更保守分类，不得写“可参与”“可供货”“具备资质”。
 【文字限制】必须只输出 JSON，不得使用 Markdown、emoji、项目符号、编号或解释性前后缀。所有中文数组文本使用自然短句；不得含连续标点、无意义括号、花哨符号或英文决策词。quote 必须逐字摘自公告原文，最多 80 个字符；reason、risk_note、exclude_reason 最多 60 个字符。
 返回严格 JSON：bucket, project_type, supplier_lead(true|false), fit_score(0-100), confidence(0-1), matched_capabilities(数组), reasons(数组), evidence(数组，每项含 field 与 quote), risk_notes(数组), exclude_reason(字符串，仅 bucket=exclude 时填写)。matched_capabilities 只能列出实际命中的具体产品、平台或系统能力，不能复制能力档案全文。
 公告：标题={r['title']}；采购方={r['buyer']}；地区={r['region']}；预算={r['budget']}；发布时间={r['published_at']}；截止={r['deadline_at']}；正文={r['content'][:content_limit]}"""
+
+def has_open_participation_evidence(record: dict, evidence: list[dict]) -> bool:
+    """允许不同站点/模型使用不同字段名，只按公告语义判断参与窗口。"""
+    if tender_has_passed_deadline(record):
+        return False
+    text = " ".join([str(record.get(k, "") or "") for k in ("title", "deadline_at", "content")] + [str(x.get("quote", "") or "") for x in evidence])
+    if re.search(r"中标|成交|候选人|结果公告|验收|合同|可行性研究|勘察|设计咨询|规划", text, re.I):
+        return False
+    return bool(re.search(r"公开招标|竞争性谈判|竞争性磋商|询比|询价|采购公告|招标公告|报名|投标|递交|供应商.*参加|截止", text, re.I))
 
 def deepseek(r: dict, conf: dict) -> tuple[dict, dict]:
     key = os.getenv("DEEPSEEK_API_KEY", "")
@@ -306,11 +315,16 @@ def deepseek(r: dict, conf: dict) -> tuple[dict, dict]:
     corpus = " ".join(str(r[k] or "") for k in ("title", "buyer", "region", "content"))
     valid_evidence = [x for x in evidence if isinstance(x, dict) and str(x.get("quote", "")).strip() in corpus]
     result["evidence"] = valid_evidence
-    # 直接商机必须同时有采购/参与和能力适配的两类原文证据；否则自动降为市场情报，避免模型乐观臆测。
-    fields = {str(x.get("field", "")) for x in valid_evidence}
-    if result["bucket"] == "direct_opportunity" and (not result.get("matched_capabilities") or not ({"采购内容", "项目阶段"} & fields)):
+    # 直接商机仍需“未结束参与入口 + 业务能力匹配”两类事实，但不再依赖模型
+    # 恰好把证据字段命名为“采购内容/项目阶段”。这会保留真实的集成合作机会。
+    has_capability_evidence = bool(result.get("matched_capabilities")) and bool(valid_evidence)
+    if result["bucket"] == "direct_opportunity" and (
+        result.get("project_type") == "early_stage"
+        or not has_capability_evidence
+        or not has_open_participation_evidence(r, valid_evidence)
+    ):
         result["bucket"] = "market_intelligence"
-        result.setdefault("risk_notes", []).append("公告原文未同时证明采购入口与能力匹配，已保守归类")
+        result.setdefault("risk_notes", []).append("公告原文未同时证明有效参与入口与能力匹配，已归为市场情报")
     usage=raw.get("usage",{}); meta={"input":int(usage.get("prompt_tokens",0)),"output":int(usage.get("completion_tokens",0)),"hit":int(usage.get("prompt_cache_hit_tokens",0))}
     meta["cost"]=estimate(meta["input"],meta["output"],meta["hit"]); return result,meta
 
@@ -354,7 +368,7 @@ def reanalyze_manual_reviews() -> dict:
 
 def reanalyze_all_ai_reviews() -> dict:
     """按最新能力档案重评全部未被人工最终定案的 AI 结论。"""
-    conf = cfg(); conf['profile_version'] = 'aohai-v4'; save_cfg(conf)
+    conf = cfg(); conf['profile_version'] = 'aohai-v5'; save_cfg(conf)
     c = conn()
     targets = [r for r in rows(c.execute("SELECT * FROM reviews WHERE ai_status NOT IN ('approved_manual','rejected_manual','expired') ORDER BY keyword_score DESC,id")) if not tender_has_passed_deadline(r)]
     if not targets:
@@ -363,7 +377,7 @@ def reanalyze_all_ai_reviews() -> dict:
     for r in targets:
         if r['ai_status'] != 'pending':
             c.execute("""INSERT INTO review_history(review_id,previous_status,previous_label,previous_fit_score,previous_confidence,previous_reason_json,previous_evidence_json,archived_at,archive_reason)
-              VALUES(?,?,?,?,?,?,?,?,?)""", (r['id'],r['ai_status'],r['ai_label'],r['ai_fit_score'],r['ai_confidence'],r['ai_reason_json'],r['ai_evidence_json'],stamp,'能力档案 aohai-v3 全量重新评审'))
+              VALUES(?,?,?,?,?,?,?,?,?)""", (r['id'],r['ai_status'],r['ai_label'],r['ai_fit_score'],r['ai_confidence'],r['ai_reason_json'],r['ai_evidence_json'],stamp,'直接商机/集成合作口径 aohai-v5 全量重新评审'))
         c.execute("UPDATE reviews SET ai_status='pending',ai_label='待按新能力标准评审',error='' WHERE id=?", (r['id'],))
     c.commit(); c.close()
     result = analyze(len(targets)); result['selected'] = len(targets)
