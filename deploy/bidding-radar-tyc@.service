@@ -1,0 +1,16 @@
+[Unit]
+Description=Fetch bidding radar Tianyancha profile %i
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=bidding
+Group=bidding
+WorkingDirectory=/opt/bidding-ai-radar
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+Environment=TYC_PROFILE=%i
+ExecStart=/usr/bin/python3.11 /opt/bidding-ai-radar/app/radar.py --db /opt/bidding-ai-radar/data/radar.db fetch tianyancha
+Nice=10
+NoNewPrivileges=true
+PrivateTmp=true
