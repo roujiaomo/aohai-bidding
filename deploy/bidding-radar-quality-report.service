@@ -1,0 +1,9 @@
+[Unit]
+Description=Aohai Radar daily quality report
+After=network.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/bidding-ai-radar
+ExecStart=/usr/bin/python3.11 /opt/bidding-ai-radar/app/radar.py --db /opt/bidding-ai-radar/data/radar.db quality-report --output /opt/bidding-ai-radar/data/reports/quality-latest.json
+

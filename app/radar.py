@@ -3717,7 +3717,7 @@ async function pollFetchStatus(){
 async function loadSources(){
   let r=await api('/api/sources');
   SRC_NAMES=Object.fromEntries(r.map(x=>[x.code,x.name]));
-  let conn=r.filter(x=>x.status==='connected');
+  let conn=r.filter(x=>x.status==='connected'&&!x.last_error);
   let pend=r.filter(x=>x.status!=='connected');
   let tagCls=s=>s==='connected'||s==='covered'?'ok':(s==='awaiting_authorization'||s==='not_automated'?'err':'warn');
   let label=s=>({'connected':'已接入','covered':'已由全国平台覆盖','unreachable':'无法访问','awaiting_authorization':'待授权','not_automated':'不自动化','pending_js':'JS 渲染','pending_timeout':'连接超时','pending_ssl':'SSL 不兼容','pending_structure':'无公告 API','pending_antibot':'反爬拦截','pending_search':'搜索不可用','manual_review':'待人工核验','planned':'计划中'}[s]||s);
@@ -3726,6 +3726,11 @@ async function loadSources(){
   if(conn.length){
     h+=`<div class="src-group-title ok">已接入（${conn.length}）</div>`;
     h+=conn.map(x=>`<div class="src-item"><b>${esc(x.name)}</b><span class="src-tag ok">${label(x.status)}</span>${addr(x)}<span class="src-note">${x.last_success_at?`上次 ${esc(x.last_success_at.slice(5,16))} &middot;`:''}${esc(x.notes)}</span></div>`).join('');
+  }
+  let failed=r.filter(x=>x.status==='connected'&&x.last_error);
+  if(failed.length){
+    h+=`<div class="src-group-title pending">抓取异常（${failed.length}）</div>`;
+    h+=failed.map(x=>`<div class="src-item"><b>${esc(x.name)}</b><span class="src-tag err">最近抓取失败</span>${addr(x)}<span class="src-note">${esc(x.last_error)}${x.last_checked_at?` · 检查于 ${esc(x.last_checked_at.slice(5,16))}`:''}</span></div>`).join('');
   }
   if(pend.length){
     h+=`<div class="src-group-title pending">待接入（${pend.length}）</div>`;
@@ -4925,6 +4930,32 @@ def cmd_quality_audit(args):
         print("以上为预览；加 --apply 执行移入回收站。")
     conn.close()
 
+def cmd_quality_report(args):
+    """输出每日只读质量基线；供定时任务和上线验收调用。"""
+    conn = connect(args.db); init_db(conn)
+    report = {"generated_at": now()}
+    report["tenders"] = dict(conn.execute("""SELECT COUNT(*) total,
+        SUM(CASE WHEN is_deleted=0 THEN 1 ELSE 0 END) active,
+        SUM(CASE WHEN is_deleted=1 THEN 1 ELSE 0 END) recycled,
+        SUM(CASE WHEN is_deleted=0 AND (content IS NULL OR LENGTH(content)<150) THEN 1 ELSE 0 END) thin_content
+        FROM tenders""").fetchone())
+    report["sources"] = {
+        "configured": conn.execute("SELECT COUNT(*) FROM sources").fetchone()[0],
+        "runtime_failed": conn.execute("SELECT COUNT(*) FROM sources WHERE last_error IS NOT NULL AND last_error!=''").fetchone()[0],
+        "latest_runs": [dict(r) for r in conn.execute("SELECT source_code,status,returned_count,created_count,updated_count,skipped_count,error,finished_at FROM fetch_runs ORDER BY id DESC LIMIT 20")],
+    }
+    report["ai"] = {"available": AI_REVIEW_DB.exists(), "mismatch": None}
+    if AI_REVIEW_DB.exists():
+        ai = sqlite3.connect(f"file:{AI_REVIEW_DB}?mode=ro", uri=True)
+        approved = {r[0] for r in ai.execute("SELECT source_tender_id FROM reviews WHERE ai_status IN ('approved','approved_manual')")}
+        active = {r[0] for r in conn.execute("SELECT id FROM tenders WHERE is_deleted=0 AND followup_status!='expired'")}
+        report["ai"].update({"approved":len(approved), "mismatch":len(approved-active), "pending":ai.execute("SELECT COUNT(*) FROM reviews WHERE ai_status IN ('pending','failed')").fetchone()[0]})
+        ai.close()
+    text = json.dumps(report, ensure_ascii=False, indent=2)
+    if args.output:
+        output = Path(args.output); output.parent.mkdir(parents=True, exist_ok=True); output.write_text(text, encoding="utf-8")
+    print(text); conn.close()
+
 def parser():
     p=argparse.ArgumentParser(description=__doc__); p.add_argument("--db",type=Path,default=DEFAULT_DB,help="SQLite 数据库路径")
     sub=p.add_subparsers(required=True); sub.add_parser("init").set_defaults(func=cmd_init); sub.add_parser("seed-demo").set_defaults(func=cmd_seed)
@@ -4952,6 +4983,9 @@ def parser():
     x.add_argument("--apply",action="store_true",help="将明确误入数据移入回收站（不物理删除）")
     x.add_argument("--include-ai-excluded",action="store_true",help="同时移入 AI 已明确排除的记录（可恢复）")
     x.set_defaults(func=cmd_quality_audit)
+    x=sub.add_parser("quality-report",help="生成只读质量与抓取健康报告")
+    x.add_argument("--output",help="可选 JSON 输出文件路径")
+    x.set_defaults(func=cmd_quality_report)
     x=sub.add_parser("serve"); x.add_argument("--host",default="127.0.0.1"); x.add_argument("--port",type=int,default=8787); x.set_defaults(func=cmd_serve)
     return p
 if __name__ == "__main__":

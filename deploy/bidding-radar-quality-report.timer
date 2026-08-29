@@ -1,0 +1,10 @@
+[Unit]
+Description=Run Aohai Radar quality report daily
+
+[Timer]
+OnCalendar=*-*-* 07:30:00
+Persistent=true
+Unit=bidding-radar-quality-report.service
+
+[Install]
+WantedBy=timers.target
