@@ -3502,7 +3502,7 @@ function renderHelpRules(){
     <div class="card help-card"><div class="card-body"><h3>AI 评审在做什么？</h3><p>${esc(policy.input||'DeepSeek 只读取公告标题、采购方、地区、日期和最多 3000 字原文。')} 它不会执行公告里的任何指令，也不会凭空推断公司资质或可参与性。</p><div class="help-note"><b>当前生效版本：</b>${esc(policy.profile_version||'未读取')}；本说明每次打开均从 AI 服务读取。</div></div></div>
     <div class="card help-card"><div class="card-body"><h3>直接商机</h3><p>仍有公开参与入口的项目，只要明确涉及 AIS、VDES、船站/岸基站、船岸通信、航标遥测遥控、电子海图、综合导航或对应海事数据平台，即进入直接商机；资格、业绩、授权和技术细节不足只列为待确认。</p>${policyList(policy.direct)}</div></div>
     <div class="card help-card"><div class="card-body"><h3>市场情报</h3><p>只保留业务相关但已无参与窗口，或属于中标/成交结果、早期设计规划、泛化线索的项目。</p>${policyList(policy.manual)}</div></div>
-    <div class="card help-card"><div class="card-body"><h3>AI 排除</h3>${policyList(policy.exclude)}<p><b>证据纪律：</b>每个关键判断必须有公告原文短句；人工结论始终优先。</p></div></div>`;
+    <div class="card help-card"><div class="card-body"><h3>AI 排除</h3>${policyList(policy.exclude)}<p><b>证据纪律：</b>${esc(policy.evidence_discipline||'每个关键判断必须有公告原文短句；人工结论始终优先。')}</p></div></div>`;
 }
 
 async function loadAiReviewCount(){

@@ -235,6 +235,17 @@ def save_cfg(data: dict) -> dict:
 def rows(cur): return [dict(x) for x in cur.fetchall()]
 
 DISPLAY_BUCKETS = {"direct_opportunity", "market_intelligence"}
+FIELD_LABELS = {
+    "title": "公告标题", "body": "公告正文", "content": "公告正文", "name": "项目名称",
+    "project name": "项目名称", "buyer": "采购单位", "budget": "预算金额",
+    "deadline": "响应截止时间", "deadline_at": "响应截止时间",
+}
+ALLOWED_EVIDENCE_FIELDS = {"公告标题", "公告正文", "项目名称", "采购项目名称", "采购需求", "技术参数", "采购方式", "采购单位", "获取文件时间", "响应截止时间", "开标时间", "资格要求", "联合体要求", "预算金额", "公告期限"}
+
+def chinese_evidence_field(value: object) -> str:
+    raw_field = ReviewTextCleaner.text(value) or "公告正文"
+    field = FIELD_LABELS.get(raw_field.lower(), raw_field)
+    return field if field in ALLOWED_EVIDENCE_FIELDS and not re.search(r"[A-Za-z]", field) else "公告正文"
 
 def resolve_manual_decision(source_status: str, source_bucket: str, decision: str, bucket: str = "") -> tuple[str, str]:
     """将人工结论转换为显示状态，不修改雷达原始公告。
@@ -322,6 +333,7 @@ def prompt_for(r: dict, conf: dict) -> str:
 【业务价值】bucket 只能是 direct_opportunity、market_intelligence、exclude。direct_opportunity 是“当前可销售跟进的机会”，必须有未结束的公开招标、询比、谈判、报名、投标递交或其他参与入口证据，并满足下列任一类：A. direct_product：原文明确采购遨海对应产品、软件或服务；B. integration_project：原文明确是智慧航道、VTS、智慧船闸、智慧港口、智慧海洋、航海保障或港航监管项目，且至少出现船舶信息、通航安全、通信导航、航标遥测、船岸通信、调度监管或海洋数据平台等具体业务范围。集成合作项目不要求已经公开到产品型号或完整技术清单；技术细节、资质、业绩、授权、联合体、独立供货方式未知时写入 risk_notes，并保留 direct_opportunity。market_intelligence 仅用于中标/成交/候选人结果、已关闭项目、可研设计规划、无有效参与入口的答疑澄清，或仅有泛化“智慧/海洋/港口”词但没有具体业务范围的线索。supplier_lead=true 仅表示可关注获奖单位或采购方，不改变 market_intelligence 分类。exclude 用于明确无关或命中强制排除。
 【证据纪律（强制）】不得把能力档案、常识或推测写成公告原文事实。每一条 reasons、risk_notes、source_objects、product_inferences 和 exclude_reason 都必须带 field 与 quote；quote 必须逐字摘自本公告，且能独立支持该条文字。没有 quote 的条目必须不输出。没有原文证据时必须采用更保守分类，不得写“可参与”“可供货”“具备资质”。
 【原文对象与推断严格分层】source_objects 只能写公告明确采购的对象，name 必须逐字包含在 quote 中；例如原文写“岸基AIS系统”，只能写“岸基AIS系统”，不得改写成“VDES岸基站”。product_inferences 只能写“产品线推断”，必须明确为推断、不得当作采购事实，并且用 quote 给出推断所依据的原文对象。没有必要的推断时输出空数组。
+【字段与语言限制】field 只能使用以下中文名称之一：公告标题、公告正文、项目名称、采购项目名称、采购需求、技术参数、采购方式、采购单位、获取文件时间、响应截止时间、开标时间、资格要求、联合体要求、预算金额、公告期限。严禁输出 title、body、content、name、buyer、budget、deadline 等英文或代码字段名。必须只输出中文业务说明；AIS、VDES、GPS、VHF 等公告已有技术缩写除外。
 【文字限制】必须只输出 JSON，不得使用 Markdown、emoji、项目符号、编号或解释性前后缀。quote 最多 80 个字符；text、name 最多 60 个字符。
 返回严格 JSON：bucket, project_type, supplier_lead(true|false), fit_score(0-100), confidence(0-1), source_objects(数组：每项含 name,field,quote), product_inferences(数组：每项含 text,field,quote), reasons(数组：每项含 text,field,quote), evidence(数组，每项含 field 与 quote), risk_notes(数组：每项含 text,field,quote), exclude_reason(对象：含 text,field,quote；仅 bucket=exclude 时填写)。不得返回 matched_capabilities。
 公告：标题={r['title']}；采购方={r['buyer']}；地区={r['region']}；预算={r['budget']}；发布时间={r['published_at']}；截止={r['deadline_at']}；正文={r['content'][:content_limit]}"""
@@ -364,7 +376,8 @@ def validate_claims(items: object, corpus: str, text_key: str = "text", require_
         if not text or not quote_raw or len(quote_raw) > 80 or quote_raw not in corpus:
             continue
         quote = ReviewTextCleaner.text(quote_raw)
-        field = ReviewTextCleaner.text(item.get("field", "公告原文")) or "公告原文"
+        # 模型偶发 title/body 等程序字段名时不让它漏到用户界面；未知字段统一降级为中文通用名。
+        field = chinese_evidence_field(item.get("field", "公告正文"))
         if require_text_in_quote:
             compact_text = re.sub(r"\s+", "", text).lower()
             compact_quote = re.sub(r"\s+", "", quote_raw).lower()
@@ -383,6 +396,34 @@ def evidence_from_claims(*groups: list[dict]) -> list[dict]:
             if value not in evidence:
                 evidence.append(value)
     return evidence
+
+def normalize_stored_review_fields() -> dict:
+    """只修正已存 AI 展示元数据的字段名称，不触碰原始商机或结论。"""
+    c = conn(); changed = 0
+    for row in c.execute("SELECT id,ai_reason_json,ai_evidence_json FROM reviews").fetchall():
+        try:
+            reason = json.loads(row["ai_reason_json"] or "{}")
+            evidence = json.loads(row["ai_evidence_json"] or "[]")
+        except Exception:
+            continue
+        dirty = False
+        for key in ("source_objects", "product_inferences", "reasons", "risk_notes"):
+            for item in reason.get(key, []) if isinstance(reason, dict) else []:
+                if isinstance(item, dict):
+                    field = chinese_evidence_field(item.get("field"))
+                    if item.get("field") != field: item["field"] = field; dirty = True
+        if isinstance(reason, dict) and isinstance(reason.get("exclude_reason"), dict):
+            item = reason["exclude_reason"]; field = chinese_evidence_field(item.get("field"))
+            if item.get("field") != field: item["field"] = field; dirty = True
+        for item in evidence if isinstance(evidence, list) else []:
+            if isinstance(item, dict):
+                field = chinese_evidence_field(item.get("field"))
+                if item.get("field") != field: item["field"] = field; dirty = True
+        if dirty:
+            c.execute("UPDATE reviews SET ai_reason_json=?,ai_evidence_json=? WHERE id=?", (json.dumps(reason,ensure_ascii=False),json.dumps(evidence,ensure_ascii=False),row["id"]))
+            changed += 1
+    c.commit(); c.close()
+    return {"updated": changed}
 
 def deepseek(r: dict, conf: dict) -> tuple[dict, dict]:
     key = os.getenv("DEEPSEEK_API_KEY", "")
@@ -787,10 +828,10 @@ HTML = r'''<!doctype html><meta charset="utf-8"><meta name="viewport" content="w
 const A=(url,opt)=>fetch(url,opt).then(async r=>{let x;try{x=await r.json()}catch(_){throw Error('服务返回异常')}if(!r.ok)throw Error(x.error||'请求失败');return x});
 const esc=s=>String(s||'').replace(/[&<>]/g,x=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[x]));let state={list:'approved',page:1,pageSize:12,total:0,stats:null,config:null};
 const loading=(on)=>document.getElementById('loading').classList.toggle('on',on);function showPage(id,el){document.querySelectorAll('.page').forEach(x=>x.classList.toggle('on',x.id===id));document.querySelectorAll('.tabs button').forEach(x=>x.classList.toggle('on',x===el))}
-const claimList=(items,key='text')=>{const rows=Array.isArray(items)?items:[];return rows.length?`<ol class="claim-list">${rows.slice(0,6).map(x=>`<li>${esc(x?.[key]||'')}<span class="quote">${esc(x?.quote||'')}</span></li>`).join('')}</ol>`:'<span class=hint>无可展示的已验证条目</span>'};
+const claimList=(items,key='text')=>{const rows=Array.isArray(items)?items:[];return rows.length?`<ol class="claim-list">${rows.slice(0,6).map(x=>`<li>${esc(x?.[key]||'')}<span class="quote">${esc(x?.quote||'')}</span></li>`).join('')}</ol>`:'<span class=hint>无可展示的已验证条目</span>'};const objectList=items=>{const rows=Array.isArray(items)?items:[];return rows.length?`<ol class="claim-list">${rows.slice(0,6).map(x=>`<li>${esc(x?.name||'')}</li>`).join('')}</ol>`:'<span class=hint>已完成原文校验</span>'};
 function reasonData(row){try{return JSON.parse(row.ai_reason_json||'{}')}catch(_){return {}}}function evidenceData(row){try{return JSON.parse(row.ai_evidence_json||'[]')}catch(_){return []}}
 function renderTabs(){const s=state.stats||{};stateTabs.innerHTML=`<button class="${state.list==='approved'?'on':''}" onclick="changeList('approved')">AI 审批通过 <span class=count>${(s.approved||0)+(s.approved_manual||0)}</span></button><button class="${state.list==='exclude'?'on':''}" onclick="changeList('exclude')">AI 排除 <span class=count>${s.exclude||0}</span></button>`}
-function card(row){const q=reasonData(row),ev=evidenceData(row),excluded=row.ai_status==='exclude';const project=`${row.buyer||'未提供采购方'} · ${row.region||'未提供地区'} · 关键词评分 ${row.keyword_score||0}${row.deadline_at?' · 截止 '+row.deadline_at:''}`;const source=q.source_objects||[];const sourceFallback=source.length?claimList(source,'name'):(ev.length?`<ol class="claim-list">${ev.slice(0,6).map(x=>`<li>${esc(x.field||'公告原文')}<span class=quote>${esc(x.quote||'')}</span></li>`).join('')}</ol>`:'<span class=hint>本次未提取到可验证原文依据</span>');const left=`<section class="review-box match"><b>公告原文依据</b>${sourceFallback}</section>`;const exclude=q.exclude_reason?.text?[q.exclude_reason]:[];const analysis=excluded?`<b>AI 排除判断</b>${claimList(exclude)}`:`<b>AI 判断</b>${claimList(q.reasons||[])}${(q.product_inferences||[]).length?`<b>产品线推断（非公告事实）</b>${claimList(q.product_inferences||[])}`:''}<b>待核实</b>${claimList(q.risk_notes||[])}`;const right=`<section class="review-box inference">${analysis}</section>`;const bucketChoice=excluded?`<select id="bucket-${row.id}" aria-label="通过后归类"><option value="">通过后归类（必选）</option><option value="direct_opportunity">直接商机</option><option value="market_intelligence">市场情报</option></select>`:'';const actions=excluded||row.ai_status==='approved'?`<div class="actions">${bucketChoice}<input id="note-${row.id}" class="note" placeholder="${excluded?'复核说明；确认排除时请填写':'审批说明；人工不通过时必须填写原因'}"><button class="btn pass" onclick="manual(${row.id},'approved')">${excluded?'改为通过，进入商机列表':'人工通过，进入商机列表'}</button><button class="btn reject" onclick="manual(${row.id},'rejected')">${excluded?'确认排除':'人工不通过'}</button></div>`:'';return `<article class="card ${excluded?'exclude':'approved'}"><a class="title" href="${esc(row.source_url||'#')}" target="_blank" rel="noopener">${esc(row.title)}</a><div class="meta">${esc(project)}</div><div class="review-grid">${left}${right}</div>${ev.length?`<details class="evidence"><summary>展开全部原文摘录</summary>${ev.map(x=>`<div><b>${esc(x.field||'公告原文')}：</b>${esc(x.quote||'')}</div>`).join('')}</details>`:''}${actions}</article>`}
+function card(row){const q=reasonData(row),excluded=row.ai_status==='exclude';const project=`${row.buyer||'未提供采购方'} · ${row.region||'未提供地区'} · 关键词评分 ${row.keyword_score||0}${row.deadline_at?' · 截止 '+row.deadline_at:''}`;const left=`<section class="review-box match"><b>公告明确采购对象</b>${objectList(q.source_objects||[])}</section>`;const exclude=q.exclude_reason?.text?[q.exclude_reason]:[];const analysis=excluded?`<b>AI 排除判断</b>${claimList(exclude)}`:`<b>AI 判断</b>${claimList(q.reasons||[])}${(q.product_inferences||[]).length?`<b>产品线推断（非公告事实）</b>${claimList(q.product_inferences||[])}`:''}<b>待核实</b>${claimList(q.risk_notes||[])}`;const right=`<section class="review-box inference">${analysis}</section>`;const bucketChoice=excluded?`<select id="bucket-${row.id}" aria-label="通过后归类"><option value="">通过后归类（必选）</option><option value="direct_opportunity">直接商机</option><option value="market_intelligence">市场情报</option></select>`:'';const actions=excluded||row.ai_status==='approved'?`<div class="actions">${bucketChoice}<input id="note-${row.id}" class="note" placeholder="${excluded?'复核说明；确认排除时请填写':'审批说明；人工不通过时必须填写原因'}"><button class="btn pass" onclick="manual(${row.id},'approved')">${excluded?'改为通过，进入商机列表':'人工通过，进入商机列表'}</button><button class="btn reject" onclick="manual(${row.id},'rejected')">${excluded?'确认排除':'人工不通过'}</button></div>`:'';return `<article class="card ${excluded?'exclude':'approved'}"><a class="title" href="${esc(row.source_url||'#')}" target="_blank" rel="noopener">${esc(row.title)}</a><div class="meta">${esc(project)}</div><div class="review-grid">${left}${right}</div>${actions}</article>`}
 function renderRows(rows){records.innerHTML=rows.map(card).join('')||'<div class="panel empty">该分类暂无有效记录。</div>';const pages=Math.max(1,Math.ceil(state.total/state.pageSize));pager.innerHTML=pages>1?`<button class="btn gray" ${state.page<=1?'disabled':''} onclick="loadRows(${state.page-1})">上一页</button><span>第 ${state.page} / ${pages} 页，共 ${state.total} 条</span><button class="btn gray" ${state.page>=pages?'disabled':''} onclick="loadRows(${state.page+1})">下一页</button>`:''}
 async function loadRows(page=1){loading(true);try{const [s,r]=await Promise.all([A('api/stats'),A(`api/records?list=${state.list}&page=${page}&page_size=${state.pageSize}`)]);state.stats=s;state.page=r.page;state.total=r.total;state.pageSize=r.page_size;hint.textContent='AI 排除仅供复核；AI 审批通过的有效公告与实时商机一一对应。';stats.innerHTML=`<div class=stat><div class=num>${s.total||0}</div><div class=label>有效评审记录</div></div><div class=stat><div class=num>${(s.approved||0)+(s.approved_manual||0)}</div><div class=label>可进入实时商机</div></div>`;renderTabs();renderRows(r.rows||[])}catch(e){records.innerHTML=`<div class="panel empty">加载失败：${esc(e.message)}</div>`}finally{loading(false)}}
 function changeList(list){state.list=list;loadRows(1)}async function manual(id,decision){const note=(document.getElementById('note-'+id)?.value||'').trim(),bucket=document.getElementById('bucket-'+id)?.value||'';if(decision==='rejected'&&!note){alert('人工不通过必须填写原因。');return}if(decision==='approved'&&document.getElementById('bucket-'+id)&&!bucket){alert('请先选择该公告通过后归入“直接商机”还是“市场情报”。');return}loading(true);try{await A(`api/records/${id}/manual`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({decision,note,bucket})});await loadRows(state.page)}catch(e){alert(e.message)}finally{loading(false)}}async function runReview(){loading(true);try{let r=await A('api/analyze',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({limit:100})});alert(`完成 ${r.processed} 条，失败 ${r.failed||0} 条`);await loadRows(1)}catch(e){alert(e.message)}finally{loading(false)}}async function reanalyzeApproved(){if(!confirm('仅重审未人工定案的 AI 通过记录；原结论会保留在历史中。是否继续？'))return;loading(true);try{let r=await A('api/reanalyze-approved',{method:'POST'});alert(`已选择 ${r.selected} 条，完成 ${r.processed} 条，失败 ${r.failed||0} 条`);await loadRows(1)}catch(e){alert(e.message)}finally{loading(false)}}
@@ -836,7 +877,7 @@ class Handler(BaseHTTPRequestHandler):
         c=conn()
         if p=='/api/config': self.send(cfg()); return
         if p=='/api/policy':
-            conf=cfg(); self.send({"profile_version":conf.get("profile_version"),"strictness":conf.get("review_strictness"),"input":"商机标题、采购方、地区、预算、正文（最多3000字）+ 遨海能力档案","output":"AI推荐 / 待人工审批 / AI不推荐；并返回中文理由、公告原文证据、能力命中和待确认项",**POLICY_VIEW}); return
+            conf=cfg(); self.send({"profile_version":conf.get("profile_version"),"strictness":conf.get("review_strictness"),"input":"商机标题、采购方、地区、预算、正文（最多3000字）+ 遨海能力档案","output":"AI推荐 / AI排除；结论与待核实项均须绑定公告原文短句","evidence_discipline":"原文采购对象与产品线推断分开展示；每条判断、风险和排除理由均须有逐字原文依据。无依据条目由服务端丢弃；字段名称统一使用中文。",**POLICY_VIEW}); return
         if p=='/api/stats':
             active = [r for r in rows(c.execute("SELECT ai_status,deadline_at,content FROM reviews")) if r['ai_status'] != 'expired' and not tender_has_passed_deadline(r)]
             x = {"total":len(active),"pending":sum(r['ai_status']=='pending' for r in active),"approved":sum(r['ai_status']=='approved' for r in active),"approved_manual":sum(r['ai_status']=='approved_manual' for r in active),"manual_review":sum(r['ai_status']=='manual_review' for r in active),"rejected":sum(r['ai_status'] in ('rejected','rejected_manual') for r in active),"exclude":c.execute("SELECT COUNT(*) FROM reviews WHERE ai_status='exclude'").fetchone()[0]}
@@ -878,6 +919,7 @@ class Handler(BaseHTTPRequestHandler):
             if p=='/api/reanalyze-manual': self.send(reanalyze_manual_reviews()); return
             if p=='/api/reanalyze-all': self.send(reanalyze_all_ai_reviews()); return
             if p=='/api/reanalyze-approved': self.send(reanalyze_approved_reviews()); return
+            if p=='/api/normalize-display-fields': self.send(normalize_stored_review_fields()); return
             if p=='/api/config': self.send(save_cfg(self.body())); return
             if p.startswith('/api/records/') and p.endswith('/manual'):
                 review_id = int(p.split('/')[3]); data=self.body(); decision=data.get('decision')

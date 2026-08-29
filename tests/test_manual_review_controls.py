@@ -32,3 +32,7 @@ class ManualReviewControlTests(unittest.TestCase):
         inferred = validate_claims([{"name": "VDES岸基基站", "field": "采购需求", "quote": "采购 AIS岸基基站系统1套"}], corpus, "name", require_text_in_quote=True)
         self.assertEqual(len(valid), 1)
         self.assertEqual(inferred, [])
+
+    def test_english_model_field_is_normalized_to_chinese(self):
+        claims = validate_claims([{"text": "采购项目仍可报名", "field": "body", "quote": "潜在供应商应获取采购文件"}], "潜在供应商应获取采购文件")
+        self.assertEqual(claims[0]["field"], "公告正文")
