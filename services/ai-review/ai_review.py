@@ -16,7 +16,7 @@ from shared_auth import (LOGIN_HTML, auth_enabled, clear_cookies, csrf_valid, cu
 
 ROOT = Path(__file__).resolve().parent
 DB = ROOT / "data" / "ai_review.db"
-SOURCE_DB = Path(os.getenv("RADAR_SOURCE_DB", "/opt/bidding-cli/data/radar.db"))
+SOURCE_DB = Path(os.getenv("RADAR_SOURCE_DB", "/opt/bidding-ai-radar/data/radar.db"))
 CONFIG = ROOT / "config.json"
 LOCK = threading.Lock()
 
@@ -193,11 +193,14 @@ def tender_is_current(record: dict | sqlite3.Row) -> bool:
     published = str(record["published_at"] or "")
     match = re.search(r"(20\d{2})[-/年.](\d{1,2})[-/月.](\d{1,2})", published)
     if not match:
-        return True
+        # 实时页的 SQLite 日期过滤无法识别非标准日期；这里同步归档，
+        # 避免 AI 通过数与实时商机数出现不一致。
+        return not published
     try:
         return dt.date(int(match.group(1)), int(match.group(2)), int(match.group(3))) + dt.timedelta(days=source_auto_expire_days()) >= dt.date.today()
     except ValueError:
-        return True
+        # 字段存在但日期非法（如 2026-06-46）不能视作仍有效。
+        return False
 
 def conn() -> sqlite3.Connection:
     DB.parent.mkdir(parents=True, exist_ok=True); c = sqlite3.connect(DB); c.row_factory = sqlite3.Row

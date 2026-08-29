@@ -861,6 +861,16 @@ def upsert_tender(conn: sqlite3.Connection, item: dict, link_ok: int = 1, rules:
     if missing: raise ValueError("缺少字段：" + ", ".join(missing))
     if not conn.execute("SELECT 1 FROM sources WHERE code=?", (item["source_code"],)).fetchone():
         raise ValueError("未知来源：" + item["source_code"])
+    # 有日期字段但其日历值非法时，不把该条记录作为“日期未知”放行。
+    # 否则 2026-06-46 这类解析错误会绕过实时页的时效判断。
+    for date_key in ("published_at", "deadline_at"):
+        raw_date = str(item.get(date_key) or "").strip()
+        m = re.match(r"^(20\d{2})[-/](\d{1,2})[-/](\d{1,2})", raw_date)
+        if m:
+            try:
+                datetime(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+            except ValueError:
+                return False, 0
     # ---- 非商机硬闸：招聘、废标/履约阶段、环评公示不能作为可跟进商机入库；中标/成交结果保留为市场情报 ----
     if non_opportunity_reason(item):
         return False, 0
