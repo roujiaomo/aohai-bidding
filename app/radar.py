@@ -2474,7 +2474,7 @@ a:hover{color:#66b1ff}
   flex-shrink:0;
 }
 .sidebar-brand span{color:#409eff;margin-right:6px;font-size:1.1rem}
-.sidebar-nav{padding:8px 0;flex:1}
+.sidebar-nav{padding:8px 0;flex:1}.sidebar-bottom{padding:8px 0 14px;border-top:1px solid rgba(255,255,255,.12);flex-shrink:0}
 .nav-group-title{
   padding:12px 16px 6px;
   font-size:.72rem;color:rgba(255,255,255,.35);
@@ -2934,7 +2934,7 @@ a{color:var(--blue-600)}a:hover{color:var(--blue-800)}
 .sidebar{width:224px;background:linear-gradient(180deg,var(--blue-900),#0a3577 100%);box-shadow:7px 0 24px rgba(7,29,73,.14)}
 .sidebar-brand{height:68px;padding:0 20px;font-size:1.04rem;border-bottom-color:rgba(255,255,255,.12);letter-spacing:.04em}
 .sidebar-brand span{color:#71b4ff;text-shadow:0 0 16px rgba(113,180,255,.7)}
-.sidebar-nav{padding:14px 0}.nav-group-title{padding:10px 20px 8px;color:rgba(210,228,255,.48);font-size:.7rem}
+.sidebar-nav{padding:14px 0}.sidebar-bottom{padding:12px 0 16px;border-top-color:rgba(210,228,255,.16)}.nav-group-title{padding:10px 20px 8px;color:rgba(210,228,255,.48);font-size:.7rem}
 .nav-item{margin:3px 12px;padding:11px 13px;border-left:0;border-radius:8px;color:rgba(229,240,255,.75);gap:10px}
 .nav-item:hover{background:rgba(124,184,255,.12);color:#fff}.nav-item.active{background:linear-gradient(90deg,rgba(59,139,244,.48),rgba(93,167,255,.15));border-left:0;box-shadow:inset 3px 0 #8cc6ff;color:#fff}.ai-review-count{margin-left:auto;min-width:19px;padding:1px 6px;text-align:center;border-radius:99px;background:#e89a28;color:#fff;font-size:.72rem;font-weight:700}.ai-review-count.zero{display:none}
 .main{margin-left:224px}.topbar{height:68px;padding:0 30px;background:rgba(255,255,255,.9);backdrop-filter:blur(12px);border-bottom-color:var(--line);box-shadow:0 2px 14px rgba(23,57,112,.04)}
@@ -3011,9 +3011,6 @@ thead th{padding:13px 14px;background:linear-gradient(90deg,#092451,#0b3476);col
     <div class="nav-item" onclick="switchPage('rules',this)">
       <span class="nav-icon">&#9881;</span> 数据规则
     </div>
-    <div class="nav-item" onclick="switchPage('help',this)">
-      <span class="nav-icon">&#10068;</span> 帮助
-    </div>
     <div class="nav-item" onclick="switchPage('sources',this)">
       <span class="nav-icon">&#9733;</span> 来源状态
     </div>
@@ -3022,6 +3019,11 @@ thead th{padding:13px 14px;background:linear-gradient(90deg,#092451,#0b3476);col
     </div>
     <div class="nav-item" onclick="switchPage('ai-review',this)">
       <span class="nav-icon">&#129302;</span> AI评审 <span id="ai-review-count" class="ai-review-count zero">0</span>
+    </div>
+  </nav>
+  <nav class="sidebar-bottom" aria-label="辅助导航">
+    <div class="nav-item" onclick="switchPage('help',this)">
+      <span class="nav-icon">&#10068;</span> 帮助
     </div>
   </nav>
 </aside>
@@ -3396,7 +3398,8 @@ function switchHelpDetail(name,el){
   document.getElementById('help-detail-'+name).classList.add('active');
 }
 async function loadHelp(){
-  currentRules=await api('/api/rules');
+  // 帮助页不复用浏览器缓存：每次打开均读取当前服务端规则，与数据规则页保持同源联动。
+  currentRules=await api('/api/rules?refresh='+Date.now(),{cache:'no-store'});
   renderHelpRules();
 }
 function renderHelpRules(){
