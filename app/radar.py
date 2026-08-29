@@ -1563,9 +1563,19 @@ def fetch_ceb() -> list[dict]:
     seen: set[str] = set()
     for page in range(1, max_pages + 1):
         url = f"{base}?categoryId=88&page={page}" if page > 1 else f"{base}?categoryId=88"
-        try:
-            html = _http_get(url, timeout=15)
-        except Exception as e:
+        html = ""
+        last_error = None
+        # CEB 首页偶发响应慢；短超时会把一次瞬时抖动误判为“无数据”。
+        for attempt in range(3):
+            try:
+                html = _http_get(url, timeout=30)
+                break
+            except Exception as e:
+                last_error = e
+                if attempt < 2:
+                    time.sleep(2 * (attempt + 1))
+        if not html:
+            e = last_error
             print(f"  [ceb] 第 {page} 页获取失败: {e}")
             break
         # 每行: <td name="imgShow" id="时间戳"> <a href="urlOpen('UUID')" title="标题"> ...
