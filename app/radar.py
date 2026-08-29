@@ -3276,7 +3276,7 @@ thead th{padding:13px 14px;background:linear-gradient(90deg,#092451,#0b3476);col
     <!-- Page: AI Review — independent reviewer service, fed only from this cloned database. -->
     <div class="page" id="page-ai-review">
       <div class="card">
-        <div class="card-header"><span>AI评审（测试副本）</span></div>
+        <div class="card-header"><span>AI评审</span></div>
         <div class="card-body" style="padding:0">
           <iframe id="ai-review-frame" src="about:blank" title="AI评审记录与动态配置" style="width:100%;height:calc(100vh - 190px);min-height:720px;border:0;display:block"></iframe>
         </div>

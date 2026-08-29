@@ -21,7 +21,7 @@ CONFIG = ROOT / "config.json"
 LOCK = threading.Lock()
 
 DEFAULT_CONFIG = {
-    "enabled": True, "mode": "shadow", "min_score": 1, "daily_limit": 100,
+    "enabled": True, "min_score": 1, "daily_limit": 100,
     "daily_budget_usd": 0.10, "content_limit": 3000, "model": "deepseek-v4-flash",
     "max_output_tokens": 700, "profile_version": "aohai-v5", "auto_analyze": False,
     # 默认宽松：把“有海事相关性但仍需核实”的项目交给人工，而非直接排除。
@@ -218,12 +218,40 @@ def conn() -> sqlite3.Connection:
 def cfg() -> dict:
     data = dict(DEFAULT_CONFIG)
     if CONFIG.exists():
-        try: data.update(json.loads(CONFIG.read_text("utf-8")))
+        try:
+            stored = json.loads(CONFIG.read_text("utf-8"))
+            # 旧版的 shadow/active 开关会造成“是否影响商机页”的误解。
+            # 正式版只有一套确定的规则：AI 结论和人工结论均只影响列表可见性。
+            if "mode" in stored:
+                stored.pop("mode")
+                CONFIG.write_text(json.dumps(stored, ensure_ascii=False, indent=2), "utf-8")
+            data.update(stored)
         except Exception: pass
     return data
 def save_cfg(data: dict) -> dict:
-    merged = dict(DEFAULT_CONFIG); merged.update(data); CONFIG.write_text(json.dumps(merged, ensure_ascii=False, indent=2), "utf-8"); return merged
+    merged = dict(DEFAULT_CONFIG); merged.update(data); merged.pop("mode", None)
+    CONFIG.write_text(json.dumps(merged, ensure_ascii=False, indent=2), "utf-8")
+    return merged
 def rows(cur): return [dict(x) for x in cur.fetchall()]
+
+DISPLAY_BUCKETS = {"direct_opportunity", "market_intelligence"}
+
+def resolve_manual_decision(source_status: str, source_bucket: str, decision: str, bucket: str = "") -> tuple[str, str]:
+    """将人工结论转换为显示状态，不修改雷达原始公告。
+
+    只有把 AI 排除项改为通过时需要补足业务桶；否则无法确定它该显示在
+    “直接商机”还是“市场情报”。人工不通过只从两个商机列表和当前评审列表隐藏，
+    原公告及人工样本仍完整保留。
+    """
+    if decision not in {"approved", "rejected"}:
+        raise ValueError("人工结论必须为通过或不通过")
+    if decision == "approved":
+        if source_status == "exclude":
+            if bucket not in DISPLAY_BUCKETS:
+                raise ValueError("将 AI 排除项改为通过时，必须选择直接商机或市场情报")
+            return "approved_manual", bucket
+        return "approved_manual", source_bucket
+    return "rejected_manual", source_bucket
 
 def backfill_human_cases(c: sqlite3.Connection) -> None:
     """将旧人工结论补入独立样本库；重复执行不会重复写入。"""
@@ -707,10 +735,10 @@ const loading=(on)=>document.getElementById('loading').classList.toggle('on',on)
 const split=v=>String(v||'').split(/[；;。]\s*/).map(x=>x.trim()).filter(Boolean);const list=v=>`<ol>${split(v).slice(0,6).map(x=>`<li>${esc(x)}</li>`).join('')}</ol>`;
 function reasonData(row){try{return JSON.parse(row.ai_reason_json||'{}')}catch(_){return {}}}function evidenceData(row){try{return JSON.parse(row.ai_evidence_json||'[]')}catch(_){return []}}
 function renderTabs(){const s=state.stats||{};stateTabs.innerHTML=`<button class="${state.list==='approved'?'on':''}" onclick="changeList('approved')">AI 审批通过 <span class=count>${(s.approved||0)+(s.approved_manual||0)}</span></button><button class="${state.list==='exclude'?'on':''}" onclick="changeList('exclude')">AI 排除 <span class=count>${s.exclude||0}</span></button>`}
-function card(row){const q=reasonData(row),ev=evidenceData(row),excluded=row.ai_status==='exclude';const reasons=(excluded?q.exclude_reason:'')||(q.reasons||[]).join('；')||row.error||'未提供理由';const project=`${row.buyer||'未提供采购方'} · ${row.region||'未提供地区'} · 关键词评分 ${row.keyword_score||0}${row.deadline_at?' · 截止 '+row.deadline_at:''}`;const left=excluded?`<section class="review-box match"><b>项目摘要</b>${esc(project)}</section>`:`<section class="review-box match"><b>匹配判断</b>${list(reasons)}<b>能力命中</b>${list((q.matched_capabilities||[]).join('；')||'未提供')}</section>`;const right=excluded?`<section class="review-box exclude-reason"><b>排除理由</b>${list(reasons)}</section>`:`<section class="review-box confirm"><b>人工确认事项</b>${list((q.risk_notes||q.missing_information||[]).join('；')||'无')}</section>`;const actions=excluded||row.ai_status==='approved'?`<div class="actions"><input id="note-${row.id}" class="note" placeholder="${excluded?'复核说明；确认排除时请填写':'审批说明；人工不通过时必须填写原因'}"><button class="btn pass" onclick="manual(${row.id},'approved')">${excluded?'改为通过，进入实时商机':'人工通过，进入商机列表'}</button><button class="btn reject" onclick="manual(${row.id},'rejected')">${excluded?'确认排除':'人工不通过'}</button></div>`:'';return `<article class="card ${excluded?'exclude':'approved'}"><a class="title" href="${esc(row.source_url||'#')}" target="_blank" rel="noopener">${esc(row.title)}</a><div class="meta">${esc(project)}</div><div class="review-grid">${left}${right}</div>${ev.length?`<details class="evidence"><summary>查看公告原文依据</summary>${ev.map(x=>`<div><b>${esc(x.field||'公告原文')}：</b>${esc(x.quote||'')}</div>`).join('')}</details>`:''}${actions}</article>`}
+function card(row){const q=reasonData(row),ev=evidenceData(row),excluded=row.ai_status==='exclude';const reasons=(excluded?q.exclude_reason:'')||(q.reasons||[]).join('；')||row.error||'未提供理由';const project=`${row.buyer||'未提供采购方'} · ${row.region||'未提供地区'} · 关键词评分 ${row.keyword_score||0}${row.deadline_at?' · 截止 '+row.deadline_at:''}`;const left=excluded?`<section class="review-box match"><b>项目摘要</b>${esc(project)}</section>`:`<section class="review-box match"><b>匹配判断</b>${list(reasons)}<b>能力命中</b>${list((q.matched_capabilities||[]).join('；')||'未提供')}</section>`;const right=excluded?`<section class="review-box exclude-reason"><b>排除理由</b>${list(reasons)}</section>`:`<section class="review-box confirm"><b>人工确认事项</b>${list((q.risk_notes||q.missing_information||[]).join('；')||'无')}</section>`;const bucketChoice=excluded?`<select id="bucket-${row.id}" aria-label="通过后归类"><option value="">通过后归类（必选）</option><option value="direct_opportunity">直接商机</option><option value="market_intelligence">市场情报</option></select>`:'';const actions=excluded||row.ai_status==='approved'?`<div class="actions">${bucketChoice}<input id="note-${row.id}" class="note" placeholder="${excluded?'复核说明；确认排除时请填写':'审批说明；人工不通过时必须填写原因'}"><button class="btn pass" onclick="manual(${row.id},'approved')">${excluded?'改为通过，进入商机列表':'人工通过，进入商机列表'}</button><button class="btn reject" onclick="manual(${row.id},'rejected')">${excluded?'确认排除':'人工不通过'}</button></div>`:'';return `<article class="card ${excluded?'exclude':'approved'}"><a class="title" href="${esc(row.source_url||'#')}" target="_blank" rel="noopener">${esc(row.title)}</a><div class="meta">${esc(project)}</div><div class="review-grid">${left}${right}</div>${ev.length?`<details class="evidence"><summary>查看公告原文依据</summary>${ev.map(x=>`<div><b>${esc(x.field||'公告原文')}：</b>${esc(x.quote||'')}</div>`).join('')}</details>`:''}${actions}</article>`}
 function renderRows(rows){records.innerHTML=rows.map(card).join('')||'<div class="panel empty">该分类暂无有效记录。</div>';const pages=Math.max(1,Math.ceil(state.total/state.pageSize));pager.innerHTML=pages>1?`<button class="btn gray" ${state.page<=1?'disabled':''} onclick="loadRows(${state.page-1})">上一页</button><span>第 ${state.page} / ${pages} 页，共 ${state.total} 条</span><button class="btn gray" ${state.page>=pages?'disabled':''} onclick="loadRows(${state.page+1})">下一页</button>`:''}
 async function loadRows(page=1){loading(true);try{const [s,r]=await Promise.all([A('api/stats'),A(`api/records?list=${state.list}&page=${page}&page_size=${state.pageSize}`)]);state.stats=s;state.page=r.page;state.total=r.total;state.pageSize=r.page_size;hint.textContent='AI 排除仅供复核；AI 审批通过的有效公告与实时商机一一对应。';stats.innerHTML=`<div class=stat><div class=num>${s.total||0}</div><div class=label>有效评审记录</div></div><div class=stat><div class=num>${(s.approved||0)+(s.approved_manual||0)}</div><div class=label>可进入实时商机</div></div>`;renderTabs();renderRows(r.rows||[])}catch(e){records.innerHTML=`<div class="panel empty">加载失败：${esc(e.message)}</div>`}finally{loading(false)}}
-function changeList(list){state.list=list;loadRows(1)}async function manual(id,decision){const note=(document.getElementById('note-'+id)?.value||'').trim();if(decision==='rejected'&&!note){alert('人工不通过必须填写原因。');return}loading(true);try{await A(`api/records/${id}/manual`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({decision,note})});await loadRows(state.page)}catch(e){alert(e.message)}finally{loading(false)}}async function runReview(){loading(true);try{let r=await A('api/analyze',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({limit:100})});alert(`完成 ${r.processed} 条，失败 ${r.failed||0} 条`);await loadRows(1)}catch(e){alert(e.message)}finally{loading(false)}}
+function changeList(list){state.list=list;loadRows(1)}async function manual(id,decision){const note=(document.getElementById('note-'+id)?.value||'').trim(),bucket=document.getElementById('bucket-'+id)?.value||'';if(decision==='rejected'&&!note){alert('人工不通过必须填写原因。');return}if(decision==='approved'&&document.getElementById('bucket-'+id)&&!bucket){alert('请先选择该公告通过后归入“直接商机”还是“市场情报”。');return}loading(true);try{await A(`api/records/${id}/manual`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({decision,note,bucket})});await loadRows(state.page)}catch(e){alert(e.message)}finally{loading(false)}}async function runReview(){loading(true);try{let r=await A('api/analyze',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({limit:100})});alert(`完成 ${r.processed} 条，失败 ${r.failed||0} 条`);await loadRows(1)}catch(e){alert(e.message)}finally{loading(false)}}
 async function loadConfig(){try{state.config=await A('api/config');form.innerHTML=Object.entries(state.config).filter(([k])=>!['today_cost'].includes(k)).map(([k,v])=>`<div class=setting><b>${esc(k)}</b><input data-k="${esc(k)}" value="${esc(v)}"></div>`).join('');const l=await A('api/learning');learning.textContent=`已沉淀 ${l.human_decisions||0} 条人工结论。`}catch(e){form.textContent=e.message}}async function saveConfig(){const x={...state.config};document.querySelectorAll('[data-k]').forEach(e=>x[e.dataset.k]=e.value);for(const k of ['enabled','auto_analyze'])if(k in x)x[k]=String(x[k]).toLowerCase()==='true';for(const k of ['min_score','daily_limit','content_limit','max_output_tokens'])if(k in x)x[k]=+x[k];if('daily_budget_usd' in x)x.daily_budget_usd=+x.daily_budget_usd;await A('api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(x)});alert('已保存')}loadRows();loadConfig();
 </script>'''
 
@@ -797,11 +825,14 @@ class Handler(BaseHTTPRequestHandler):
             if p=='/api/config': self.send(save_cfg(self.body())); return
             if p.startswith('/api/records/') and p.endswith('/manual'):
                 review_id = int(p.split('/')[3]); data=self.body(); decision=data.get('decision')
-                if decision not in {'approved','rejected'}: raise ValueError('人工结论必须为通过或不通过')
                 note = str(data.get('note','')).strip()
                 if decision == 'rejected' and not note: raise ValueError('人工不通过必须填写原因')
-                status='approved_manual' if decision=='approved' else 'rejected_manual'; label='人工通过' if decision=='approved' else '人工不通过'
-                reviewed_at=now(); c=conn(); source=c.execute("SELECT * FROM reviews WHERE id=?",(review_id,)).fetchone(); cur=c.execute("UPDATE reviews SET ai_status=?,ai_label=?,reviewer='人工评审',reviewed_at=?,review_note=? WHERE id=? AND ai_status IN ('approved','manual_review','exclude')",(status,label,reviewed_at,note[:500],review_id))
+                reviewed_at=now(); c=conn(); source=c.execute("SELECT * FROM reviews WHERE id=?",(review_id,)).fetchone()
+                if not source:
+                    c.close(); raise ValueError('该记录不存在')
+                status, bucket = resolve_manual_decision(source['ai_status'], source['bucket'], decision, str(data.get('bucket','')).strip())
+                label='人工通过' if decision=='approved' else '人工不通过'
+                cur=c.execute("UPDATE reviews SET ai_status=?,ai_label=?,bucket=?,reviewer='人工评审',reviewed_at=?,review_note=? WHERE id=? AND ai_status IN ('approved','manual_review','exclude')",(status,label,bucket,reviewed_at,note[:500],review_id))
                 if cur.rowcount != 1:
                     c.rollback(); c.close(); raise ValueError('该记录已被处理或不存在')
                 c.execute("""INSERT OR REPLACE INTO human_review_cases(source_review_id,title,buyer,region,source_url,keyword_score,ai_status_before,ai_reason_json,human_decision,human_note,reviewed_at)
