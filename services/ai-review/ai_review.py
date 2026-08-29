@@ -54,7 +54,7 @@ CANONICAL_CAPABILITIES = (
     "船舶远程监控", "通航安全监控平台", "智慧渔港监管", "海洋牧场监控", "港航海事监管平台",
 )
 POLICY_VIEW = {
-    "direct": ["明确产品：VDES岸基站、船载终端、AIS航标、遥测遥控、ECDIS/INS、AIS数据与监管平台", "集成合作：仍可报名的智慧航道、VTS、智慧港口/海洋项目，且原文明确通信导航、通航安全、船舶信息或数据平台范围", "资格、业绩、授权、联合体和技术细节不全时保留直接商机，并标为待确认"],
+    "direct": ["明确产品：海事场景下的 AIS、VDES、船站/船载终端、岸基站/通信基站、遥测遥控、ECDIS/INS、AIS数据与监管平台", "集成合作：仍可报名的智慧航道、VTS、智慧港口/海洋项目，且原文明确通信导航、通航安全、船舶信息或数据平台范围", "资格、业绩、授权、联合体和技术细节不全时保留直接商机，并标为待确认"],
     "manual": ["航标/LED灯器及施工维护", "仅雷达、CCTV、北斗、VHF单品", "低轨监测、卫星总装、特殊资质/业绩/联合体要求"],
     "exclude": ["电力AIS开关设备", "普通照明、保险、培训、会议", "施工监理、疏浚养护等非电子智能化交付", "成交结果或已指定供应商、无竞争机会项目"],
 }
@@ -172,11 +172,17 @@ def tender_has_passed_deadline(record: dict | sqlite3.Row) -> bool:
         r"(?:截止|递交|响应文件提交|投标文件提交|开标)[^。；;]{0,80}?(20\d{2})[年./-](\d{1,2})[月./-](\d{1,2})",
         r"(20\d{2})[年./-](\d{1,2})[月./-](\d{1,2})[^。；;]{0,80}?(?:截止|递交|开标)",
     )
+    # 同一公告常同时出现“获取文件截止日”和真正的投标/开标日。旧逻辑只要
+    # 命中任一较早日期就判过期，会把仍可投标的公告错误归档。收集所有语境日期，
+    # 以最晚日期作为有效参与窗口的保守上界。
+    candidates: list[dt.date] = []
     for pattern in patterns:
-        found = re.search(pattern, content)
-        if found and deadline_has_passed("-".join(found.groups())):
-            return True
-    return False
+        for found in re.finditer(pattern, content):
+            try:
+                candidates.append(dt.date(*map(int, found.groups())))
+            except ValueError:
+                continue
+    return bool(candidates) and max(candidates) < dt.date.today()
 
 def source_auto_expire_days() -> int:
     """从雷达配置读取实时页窗口，避免两个服务各自维护一套时效规则。"""
@@ -295,10 +301,28 @@ def has_open_participation_evidence(record: dict, evidence: list[dict]) -> bool:
     """允许不同站点/模型使用不同字段名，只按公告语义判断参与窗口。"""
     if tender_has_passed_deadline(record):
         return False
-    text = " ".join([str(record.get(k, "") or "") for k in ("title", "deadline_at", "content")] + [str(x.get("quote", "") or "") for x in evidence])
-    if re.search(r"中标|成交|候选人|结果公告|验收|合同|可行性研究|勘察|设计咨询|规划", text, re.I):
+    title = str(record.get("title", "") or "")
+    content = str(record.get("content", "") or "")
+    # “结果”常见于政采网站导航和页脚，不能据此推翻一条标题明确为公开招标的公告。
+    # 仅把公告标题或正文中的明确结果/履约语义作为关闭项目证据。
+    closed = r"(?:中标|成交|候选人).{0,12}(?:公告|公示|结果)|(?:中标|成交|结果)公告|验收|合同|可行性研究|勘察|设计咨询|规划"
+    if re.search(closed, title, re.I):
         return False
-    return bool(re.search(r"公开招标|竞争性谈判|竞争性磋商|询比|询价|采购公告|招标公告|报名|投标|递交|供应商.*参加|截止", text, re.I))
+    text = " ".join([title, str(record.get("deadline_at", "") or ""), content] + [str(x.get("quote", "") or "") for x in evidence])
+    if re.search(r"公开招标|竞争性谈判|竞争性磋商|询比|询价|采购公告|招标公告|报名|投标|递交|供应商.*参加|截止", text, re.I):
+        return True
+    return not bool(re.search(closed, content[:1200], re.I))
+
+def has_core_maritime_product(record: dict) -> bool:
+    """用户确认的直接商机硬口径：海事场景中的 AIS/VDES/船岸站类产品。"""
+    text = " ".join(str(record.get(k, "") or "") for k in ("title", "buyer", "content"))
+    lower = text.lower()
+    # 电力行业 AIS（空气绝缘开关）不能因缩写误入海事产品池。
+    if re.search(r"空气绝缘|开关柜|变电|输配电|电网", text):
+        return False
+    product = bool(re.search(r"(?<![a-z])ais(?![a-z])|(?<![a-z])vdes(?![a-z])|船站|船载终端|岸基站|船岸(?:通信|无线)|通信基站|航标遥测|航标遥控", lower, re.I))
+    maritime = bool(re.search(r"海事|航海|航标|船舶|渔船|船岸|港航|通航|水上", text))
+    return product and maritime
 
 def deepseek(r: dict, conf: dict) -> tuple[dict, dict]:
     key = os.getenv("DEEPSEEK_API_KEY", "")
@@ -328,6 +352,12 @@ def deepseek(r: dict, conf: dict) -> tuple[dict, dict]:
     ):
         result["bucket"] = "market_intelligence"
         result.setdefault("risk_notes", []).append("公告原文未同时证明有效参与入口与能力匹配，已归为市场情报")
+    # 已确认的经营口径优先于模型的保守倾向：这类产品就是遨海可直接跟进的
+    # 核心方向。仍要求公开参与窗口，并保留模型的资格/技术风险提示。
+    if result["bucket"] == "market_intelligence" and has_open_participation_evidence(r, valid_evidence) and has_core_maritime_product(r):
+        result["bucket"] = "direct_opportunity"
+        result["project_type"] = "direct_product"
+        result.setdefault("risk_notes", []).append("海事 AIS/VDES/船岸站类核心产品，按当前口径进入直接商机")
     usage=raw.get("usage",{}); meta={"input":int(usage.get("prompt_tokens",0)),"output":int(usage.get("completion_tokens",0)),"hit":int(usage.get("prompt_cache_hit_tokens",0))}
     meta["cost"]=estimate(meta["input"],meta["output"],meta["hit"]); return result,meta
 

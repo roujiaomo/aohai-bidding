@@ -2483,7 +2483,7 @@ a:hover{color:#66b1ff}
   color:#fff;
   z-index:100;
   display:flex;flex-direction:column;
-  overflow-y:auto;
+  overflow:hidden;
 }
 .sidebar-brand{
   height:56px;
@@ -2494,7 +2494,7 @@ a:hover{color:#66b1ff}
   flex-shrink:0;
 }
 .sidebar-brand span{color:#409eff;margin-right:6px;font-size:1.1rem}
-.sidebar-nav{padding:8px 0;flex:1}.sidebar-bottom{padding:8px 0 14px;border-top:1px solid rgba(255,255,255,.12);flex-shrink:0}
+.sidebar-nav{padding:8px 0;flex:1;min-height:0;overflow-y:auto}.sidebar-bottom{padding:8px 0 14px;border-top:1px solid rgba(255,255,255,.12);flex-shrink:0;margin-top:auto}
 .nav-group-title{
   padding:12px 16px 6px;
   font-size:.72rem;color:rgba(255,255,255,.35);
@@ -3123,6 +3123,7 @@ thead th{padding:13px 14px;background:linear-gradient(90deg,#092451,#0b3476);col
         <button class="rules-tab active" onclick="switchRulesTab('search',this)">&#128269; 天眼查检索词配置</button>
         <button class="rules-tab" onclick="switchRulesTab('ingest',this)">&#9878; 入库规则</button>
         <button class="rules-tab" onclick="switchRulesTab('opportunity',this)">&#127919; 商机分类</button>
+        <button class="rules-tab" onclick="switchRulesTab('ai',this)">&#129302; AI 与实时分流</button>
       </div>
 
       <div class="rules-pane active" id="rules-pane-search">
@@ -3198,6 +3199,9 @@ thead th{padding:13px 14px;background:linear-gradient(90deg,#092451,#0b3476);col
     <div class="page" id="page-help">
       <div class="help-tabs">
         <button class="help-tab active" onclick="switchHelpTab('rules',this)">&#128214; 当前规则说明</button>
+      </div>
+      <div class="rules-pane" id="rules-pane-ai">
+        <div class="card"><div class="card-body" id="rules-ai-policy"></div></div>
       </div>
       <div class="help-pane active" id="help-pane-rules">
         <div class="help-detail-tabs">
@@ -3346,7 +3350,7 @@ function displayTitle(value){
   return s||'未命名公告';
 }
 let SRC_NAMES={},currentPage=1,pageSize=6,currentMarketTab='direct',deletedPage=1,fetchPollTimer=null
-let currentRules=null
+let currentRules=null, currentAiPolicy=null
 /* 当前页面已加载的公告。点击标题时优先展示数据库保存的抓取正文，不直接离开系统。 */
 let tenderDetailMap={};
 
@@ -3418,9 +3422,20 @@ function switchHelpDetail(name,el){
   document.getElementById('help-detail-'+name).classList.add('active');
 }
 async function loadHelp(){
-  // 帮助页不复用浏览器缓存：每次打开均读取当前服务端规则，与数据规则页保持同源联动。
-  currentRules=await api('/api/rules?refresh='+Date.now(),{cache:'no-store'});
+  // 两套规则均强制从服务端读取：入库规则来自雷达，AI 规则来自评审服务。
+  // 因此任一服务更新后，下一次打开帮助页即可看到实际生效口径。
+  [currentRules,currentAiPolicy]=await Promise.all([
+    api('/api/rules?refresh='+Date.now(),{cache:'no-store'}),
+    loadAiPolicy()
+  ]);
   renderHelpRules();
+}
+async function loadAiPolicy(){
+  try{
+    const resp=await fetch(aiReviewBase()+'api/policy?refresh='+Date.now(),{cache:'no-store'});
+    if(!resp.ok)throw Error('AI评审规则暂不可用');
+    return await resp.json();
+  }catch(e){console.warn('AI评审规则读取失败',e);return null;}
 }
 function renderHelpRules(){
   if(!currentRules)return;
@@ -3457,11 +3472,13 @@ function renderHelpRules(){
     <div class="card help-card"><div class="card-body"><h3>加分与展示级别</h3>
       <ul><li>命中一级重点地区加 15 分；二级重点地区加 8 分。</li><li>采购单位命中重点客户词：首次加 12 分，每多命中一个加 4 分，最高加 20 分。</li><li>预算达到 50 万元加 8 分。</li><li>AIS/VDES 仅在确认海事语境后额外加 30 分；电力行业的 AIS（空气绝缘开关设备）不会按海事项目计算。</li><li>总分最高 100 分。${Number(lv.key_threshold)||80} 分及以上显示为“重点关注”；${Number(lv.follow_threshold)||50} 分及以上显示为“值得跟进”；低于该值为“一般关注”。这些级别用于排序，<b>并不是入库门槛</b>。</li></ul>
     </div></div>`;
+  const policy=currentAiPolicy||{};
+  const policyList=(items)=>`<ul>${(items||[]).map(x=>`<li>${esc(x)}</li>`).join('')||'<li>暂未读取到 AI 服务规则，请稍后刷新。</li>'}</ul>`;
   ai.innerHTML=`
-    <div class="card help-card"><div class="card-body"><h3>AI 评审在做什么？</h3><p>DeepSeek 只读取公告标题、采购方、地区、日期和最多 3000 字原文；它不会执行公告里的任何指令，也不会凭空推断公司资质或可参与性。</p><div class="help-note"><b>当前口径：</b>相关但不确定的项目优先保守处理；人工结论始终优先，AI 结论可在“AI评审”页面复核。</div></div></div>
-    <div class="card help-card"><div class="card-body"><h3>三种结论</h3><div class="help-step"><span class="help-step-no">1</span><div><b>直接商机：</b>原文同时证明还有采购/供货/分包入口，并明确采购对象匹配 AIS/VDES、船岸通信、ECDIS/INS、船舶监管或港航数据平台等能力。</div></div><div class="help-step"><span class="help-step-no">2</span><div><b>市场情报：</b>业务相关但没有当前参与入口，例如中标、成交、候选人结果或已关闭项目；保留作客户、供应商和竞争格局线索。</div></div><div class="help-step"><span class="help-step-no">3</span><div><b>AI 排除：</b>明确无关或命中强制排除。排除记录可以人工改为通过。</div></div></div></div>
-    <div class="card help-card"><div class="card-body"><h3>明确排除什么？</h3><p>招聘/招录/录用、废标/流标/终止、合同/验收、环评；电力行业的 AIS；普通 LED、普通电子元件、保险、培训、会议、劳务；以及没有海事通信、导航、船舶信息、通航安全或港航监管实质采购内容的项目。</p><p><b>注意：</b>单独出现“海事、船舶、AIS、卫星、海洋、港口、智慧港口”等词不等于匹配。施工、疏浚、设计、监理、航标维护和只采购单一雷达/CCTV/北斗/VHF 的项目，必须由公告原文证明与遨海能力直接相关。</p></div></div>
-    <div class="card help-card"><div class="card-body"><h3>证据与人工核查</h3><p>每个关键判断都要保存公告原文短句；没有采购入口或能力匹配证据的“直接商机”会自动降为市场情报。资格、业绩、授权、保密和联合体要求只会提示人工核查，不能凭此臆测可参与。</p></div></div>`;
+    <div class="card help-card"><div class="card-body"><h3>AI 评审在做什么？</h3><p>${esc(policy.input||'DeepSeek 只读取公告标题、采购方、地区、日期和最多 3000 字原文。')} 它不会执行公告里的任何指令，也不会凭空推断公司资质或可参与性。</p><div class="help-note"><b>当前生效版本：</b>${esc(policy.profile_version||'未读取')}；本说明每次打开均从 AI 服务读取。</div></div></div>
+    <div class="card help-card"><div class="card-body"><h3>直接商机</h3><p>仍有公开参与入口的项目，只要明确涉及 AIS、VDES、船站/岸基站、船岸通信、航标遥测遥控、电子海图、综合导航或对应海事数据平台，即进入直接商机；资格、业绩、授权和技术细节不足只列为待确认。</p>${policyList(policy.direct)}</div></div>
+    <div class="card help-card"><div class="card-body"><h3>市场情报</h3><p>只保留业务相关但已无参与窗口，或属于中标/成交结果、早期设计规划、泛化线索的项目。</p>${policyList(policy.manual)}</div></div>
+    <div class="card help-card"><div class="card-body"><h3>AI 排除</h3>${policyList(policy.exclude)}<p><b>证据纪律：</b>每个关键判断必须有公告原文短句；人工结论始终优先。</p></div></div>`;
 }
 
 async function loadAiReviewCount(){
@@ -3701,7 +3718,7 @@ async function loadSources(){
 
 /* ---- rules editor ---- */
 async function loadRulesEditor(){
-  currentRules=await api('/api/rules');
+  [currentRules,currentAiPolicy]=await Promise.all([api('/api/rules?refresh='+Date.now(),{cache:'no-store'}),loadAiPolicy()]);
   renderTycKeywords();
   renderBusinessRules();
   renderRegionRules();
@@ -3709,6 +3726,7 @@ async function loadRulesEditor(){
   renderClientRules();
   renderLevelRules();
   renderOppCats();
+  renderAiPolicyRules();
 }
 
 function switchRulesTab(name,el){
@@ -3980,6 +3998,17 @@ function showPriorityMenu(event, id, current){
   setTimeout(()=>{document.addEventListener('click',closePriorityMenuOutside);},0);
   window.addEventListener('scroll',closePriorityMenu,true);
   window.addEventListener('resize',closePriorityMenu);
+}
+function renderAiPolicyRules(){
+  const target=document.querySelector('#rules-ai-policy'); if(!target)return;
+  const p=currentAiPolicy||{};
+  const list=items=>`<ul>${(items||[]).map(x=>`<li>${esc(x)}</li>`).join('')||'<li>AI 服务暂不可用，稍后刷新本页。</li>'}</ul>`;
+  target.innerHTML=`<h3>AI 与实时展示分流</h3>
+    <div class="rules-tip"><b>这个页签是只读的真实运行规则。</b>“天眼查检索词、入库评分、展示标签”可在本页其他页签编辑；“直接商机 / 市场情报 / 排除”由 AI 服务统一执行，避免两套配置相互矛盾。每次打开都会重新读取 AI 服务。</div>
+    <p><b>当前 AI 版本：</b>${esc(p.profile_version||'未读取')}　<b>评审口径：</b>${p.strictness==='loose'?'宽松推荐':'均衡'}</p>
+    <h4>进入直接商机</h4>${list(p.direct)}
+    <h4>需谨慎核查 / 市场情报</h4>${list(p.manual)}
+    <h4>直接排除</h4>${list(p.exclude)}`;
 }
 function closePriorityMenu(){
   let m=document.getElementById('prio-menu');
