@@ -16,6 +16,10 @@ class IngestionPolicyTests(unittest.TestCase):
         item = {"title": "海南海事局2026年度录用公务员报到公告"}
         self.assertEqual(non_opportunity_reason(item), "招聘/录用公告")
 
+    def test_property_rental_and_place_name_beidou_are_rejected(self):
+        self.assertEqual(non_opportunity_reason({"title": "重庆市涪陵区北斗路14号2栋招租"}), "资产招租/经营权信息")
+        self.assertEqual(non_opportunity_reason({"title": "北斗镇卫生院建设项目监理"}), "地名北斗误匹配")
+
     def test_hainan_non_tender_column_is_rejected(self):
         item = {
             "title": "某海事系统采购公告",

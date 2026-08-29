@@ -329,6 +329,12 @@ def ai_review_bucket_ids(bucket: str) -> set[int] | None:
     except Exception:
         return None
 
+def ai_review_approved_ids() -> set[int] | None:
+    """历史页与实时页都只展示 AI/人工确认通过的商机。"""
+    direct = ai_review_bucket_ids("direct")
+    market = ai_review_bucket_ids("market")
+    return None if direct is None or market is None else direct | market
+
 
 def apply_ai_review_gate(items: list[dict]) -> list[dict]:
     """给副本列表补充 AI 标签；实时列表的筛选由查询阶段完成，避免分页错位。"""
@@ -4280,12 +4286,14 @@ def make_handler(db_path: Path):
                     self.send_json({"rows":result,"total":total}); return
                 # ---- 历史商机：全库数据，不过滤过期，但过滤已删除 ----
                 if url.path == "/api/history-stats":
-                    # 历史商机：全库展示（留存一年，不设 7 天窗口；近 7 天的也在实时页同步展示）
-                    del_filter = "WHERE is_deleted = 0"
-                    total_all = conn.execute(f"SELECT count(*) FROM tenders {del_filter}").fetchone()[0]
-                    key_cnt = conn.execute(f"SELECT count(*) FROM tenders WHERE priority='重点关注' AND is_deleted=0").fetchone()[0]
-                    follow_cnt = conn.execute(f"SELECT count(*) FROM tenders WHERE priority='值得跟进' AND is_deleted=0").fetchone()[0]
-                    src_cnt = conn.execute(f"SELECT count(DISTINCT source_code) FROM tenders {del_filter}").fetchone()[0]
+                    approved_ids = ai_review_approved_ids()
+                    marks = ",".join("?" for _ in approved_ids) if approved_ids else ""
+                    ai_filter = (f" AND id IN ({marks})" if approved_ids else " AND 1=0") if approved_ids is not None else ""
+                    vals = sorted(approved_ids or ())
+                    total_all = conn.execute(f"SELECT count(*) FROM tenders WHERE is_deleted=0 {ai_filter}", vals).fetchone()[0]
+                    key_cnt = conn.execute(f"SELECT count(*) FROM tenders WHERE priority='重点关注' AND is_deleted=0 {ai_filter}", vals).fetchone()[0]
+                    follow_cnt = conn.execute(f"SELECT count(*) FROM tenders WHERE priority='值得跟进' AND is_deleted=0 {ai_filter}", vals).fetchone()[0]
+                    src_cnt = conn.execute(f"SELECT count(DISTINCT source_code) FROM tenders WHERE is_deleted=0 {ai_filter}", vals).fetchone()[0]
                     self.send_json({"total": total_all, "key": key_cnt, "follow": follow_cnt, "sources": src_cnt}); return
                 if url.path == "/api/history":
                     q=params.get("q",[""])[0].strip(); min_score=int(params.get("min_score",["0"])[0] or 0)
@@ -4294,6 +4302,13 @@ def make_handler(db_path: Path):
                     # 历史商机：全库展示，支持按标题/采购单位/地区/正文/代理机构/中标单位检索
                     where_clauses = ["score>=?", "is_deleted=0"]
                     where_vals = [min_score]
+                    approved_ids = ai_review_approved_ids()
+                    if approved_ids is not None:
+                        if approved_ids:
+                            where_clauses.append(f"id IN ({','.join('?' for _ in approved_ids)})")
+                            where_vals.extend(sorted(approved_ids))
+                        else:
+                            where_clauses.append("1=0")
                     if priority in ("重点关注", "值得跟进", "一般关注"):
                         where_clauses.append("priority=?")
                         where_vals.append(priority)
