@@ -4980,16 +4980,18 @@ def cmd_quality_report(args):
     latest_by_source: dict[str, dict] = {}
     for run in latest_runs:
         latest_by_source.setdefault(run["source_code"], run)
-    source_alerts = []
+    source_alerts, source_observations = [], []
     for code, run in latest_by_source.items():
         if run["status"] != "success" or run.get("error"):
             source_alerts.append({"level":"error", "source":code, "reason":"最近一次抓取失败", "finished_at":run.get("finished_at", "")})
         elif int(run.get("returned_count") or 0) > 0 and int(run.get("created_count") or 0) == 0 and int(run.get("updated_count") or 0) == 0:
-            source_alerts.append({"level":"warning", "source":code, "reason":"有返回但无新增或更新，需结合去重情况核验", "finished_at":run.get("finished_at", "")})
+            # 高频全量抓取通常会被去重；它值得保留给日报观察，但不是需要
+            # 唤醒用户的故障。真正异常由连续失败、规则污染或 AI 不一致触发。
+            source_observations.append({"source":code, "reason":"有返回但无新增或更新（可能为正常去重）", "finished_at":run.get("finished_at", "")})
     report["sources"] = {
         "configured": conn.execute("SELECT COUNT(*) FROM sources").fetchone()[0],
         "runtime_failed": conn.execute("SELECT COUNT(*) FROM sources WHERE last_error IS NOT NULL AND last_error!=''").fetchone()[0],
-        "latest_runs": latest_runs[:20], "alerts": source_alerts,
+        "latest_runs": latest_runs[:20], "alerts": source_alerts, "observations": source_observations,
     }
     report["ai"] = {"available": AI_REVIEW_DB.exists(), "mismatch": None}
     if AI_REVIEW_DB.exists():
