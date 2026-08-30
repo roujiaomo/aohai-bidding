@@ -51,9 +51,11 @@ def release_gate(args) -> int:
     rules = radar.load_config().get("rules") or {}
     errors = radar.validate_rules(rules)
     tests = subprocess.run([sys.executable, "-m", "unittest", "discover", "-s", "tests", "-v"], cwd=ROOT, text=True, capture_output=True)
+    document = subprocess.run([sys.executable, "scripts/verify_rule_document.py"], cwd=ROOT, text=True, capture_output=True)
     result = {"rulebook": effective_rulebook(rules), "rulebook_version": RULEBOOK_VERSION,
-              "config_errors": errors, "tests_ok": tests.returncode == 0,
-              "tests_tail": (tests.stdout + tests.stderr)[-3000:], "release_ready": not errors and tests.returncode == 0}
+              "config_errors": errors, "tests_ok": tests.returncode == 0, "rule_document_ok": document.returncode == 0,
+              "tests_tail": (tests.stdout + tests.stderr)[-3000:], "rule_document": (document.stdout + document.stderr).strip(),
+              "release_ready": not errors and tests.returncode == 0 and document.returncode == 0}
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0 if result["release_ready"] else 1
 
