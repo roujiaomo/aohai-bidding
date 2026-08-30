@@ -1,0 +1,10 @@
+[Unit]
+Description=Check Aohai Radar daily quality alerts
+
+[Timer]
+OnCalendar=*-*-* 07:35:00
+Persistent=true
+Unit=bidding-radar-quality-notify.service
+
+[Install]
+WantedBy=timers.target

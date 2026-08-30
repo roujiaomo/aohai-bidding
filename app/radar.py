@@ -32,6 +32,7 @@ if str(AUTH_MODULE_DIR) not in sys.path:
 from shared_auth import (LOGIN_HTML, auth_enabled, clear_cookies, csrf_valid, current_user, init_auth,
                          login as auth_login, logout as auth_logout, session_cookies)
 from ingestion_policy import ingestion_issue_reason, non_opportunity_reason, title_gate_reason
+from governance import RULEBOOK_VERSION, effective_rulebook
 from source_parsers import parse_li_list
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -193,6 +194,11 @@ CREATE TABLE IF NOT EXISTS fetch_runs (
   updated_count INTEGER DEFAULT 0, skipped_count INTEGER DEFAULT 0, error TEXT DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_fetch_runs_source_time ON fetch_runs(source_code, id DESC);
+CREATE TABLE IF NOT EXISTS rule_versions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, version TEXT NOT NULL, digest TEXT NOT NULL,
+  rules_json TEXT NOT NULL, change_note TEXT DEFAULT '', created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_rule_versions_time ON rule_versions(id DESC);
 CREATE TABLE IF NOT EXISTS tenders (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   fingerprint TEXT NOT NULL UNIQUE, source_code TEXT NOT NULL,
@@ -4242,7 +4248,13 @@ def make_handler(db_path: Path):
                     }); return
                 if url.path == "/api/sources": self.send_json(rows_as_dicts(conn.execute("SELECT * FROM sources ORDER BY CASE status WHEN 'connected' THEN 0 WHEN 'awaiting_authorization' THEN 2 WHEN 'not_automated' THEN 3 ELSE 1 END,name").fetchall())); return
                 if url.path == "/api/config": self.send_json(load_config()); return
-                if url.path == "/api/rules": self.send_json(load_config().get("rules", RULES_DEFAULTS)); return
+                if url.path == "/api/rules":
+                    rules = load_config().get("rules", RULES_DEFAULTS)
+                    # Preserve the existing payload shape for the UI while
+                    # exposing a machine-readable rule version to every client.
+                    payload = _deep_copy(rules)
+                    payload["_governance"] = effective_rulebook(rules)
+                    self.send_json(payload); return
                 if url.path == "/api/tenders":
                     q=params.get("q",[""])[0].strip(); min_score=int(params.get("min_score",["0"])[0] or 0)
                     priority=params.get("priority",[""])[0].strip()
@@ -4502,6 +4514,8 @@ def make_handler(db_path: Path):
                 body = self.rfile.read(length).decode("utf-8")
                 try:
                     new_rules = json.loads(body)
+                    if isinstance(new_rules, dict):
+                        new_rules.pop("_governance", None)
                     # 验证规则
                     errors = validate_rules(new_rules)
                     if errors:
@@ -4510,7 +4524,14 @@ def make_handler(db_path: Path):
                     cfg = load_config()
                     cfg["rules"] = new_rules
                     save_config(cfg)
-                    self.send_json({"ok": True})
+                    snapshot = effective_rulebook(new_rules)
+                    audit = connect(db_path)
+                    init_db(audit)
+                    audit.execute("INSERT INTO rule_versions(version,digest,rules_json,change_note,created_at) VALUES(?,?,?,?,?)",
+                                  (RULEBOOK_VERSION, snapshot["digest"], json.dumps(new_rules, ensure_ascii=False),
+                                   str(new_rules.get("change_note", ""))[:500], now()))
+                    audit.commit(); audit.close()
+                    self.send_json({"ok": True, "governance": snapshot})
                 except Exception as exc:
                     self.send_error(400, str(exc))
             else:
@@ -4948,16 +4969,27 @@ def cmd_quality_audit(args):
 def cmd_quality_report(args):
     """输出每日只读质量基线；供定时任务和上线验收调用。"""
     conn = connect(args.db); init_db(conn)
-    report = {"generated_at": now()}
+    rules = load_config().get("rules") or {}
+    report = {"generated_at": now(), "governance": effective_rulebook(rules)}
     report["tenders"] = dict(conn.execute("""SELECT COUNT(*) total,
         SUM(CASE WHEN is_deleted=0 THEN 1 ELSE 0 END) active,
         SUM(CASE WHEN is_deleted=1 THEN 1 ELSE 0 END) recycled,
         SUM(CASE WHEN is_deleted=0 AND (content IS NULL OR LENGTH(content)<150) THEN 1 ELSE 0 END) thin_content
         FROM tenders""").fetchone())
+    latest_runs = [dict(r) for r in conn.execute("SELECT source_code,status,returned_count,created_count,updated_count,skipped_count,error,finished_at FROM fetch_runs ORDER BY id DESC LIMIT 100")]
+    latest_by_source: dict[str, dict] = {}
+    for run in latest_runs:
+        latest_by_source.setdefault(run["source_code"], run)
+    source_alerts = []
+    for code, run in latest_by_source.items():
+        if run["status"] != "success" or run.get("error"):
+            source_alerts.append({"level":"error", "source":code, "reason":"最近一次抓取失败", "finished_at":run.get("finished_at", "")})
+        elif int(run.get("returned_count") or 0) > 0 and int(run.get("created_count") or 0) == 0 and int(run.get("updated_count") or 0) == 0:
+            source_alerts.append({"level":"warning", "source":code, "reason":"有返回但无新增或更新，需结合去重情况核验", "finished_at":run.get("finished_at", "")})
     report["sources"] = {
         "configured": conn.execute("SELECT COUNT(*) FROM sources").fetchone()[0],
         "runtime_failed": conn.execute("SELECT COUNT(*) FROM sources WHERE last_error IS NOT NULL AND last_error!=''").fetchone()[0],
-        "latest_runs": [dict(r) for r in conn.execute("SELECT source_code,status,returned_count,created_count,updated_count,skipped_count,error,finished_at FROM fetch_runs ORDER BY id DESC LIMIT 20")],
+        "latest_runs": latest_runs[:20], "alerts": source_alerts,
     }
     report["ai"] = {"available": AI_REVIEW_DB.exists(), "mismatch": None}
     if AI_REVIEW_DB.exists():
@@ -4966,6 +4998,14 @@ def cmd_quality_report(args):
         active = {r[0] for r in conn.execute("SELECT id FROM tenders WHERE is_deleted=0 AND followup_status!='expired'")}
         report["ai"].update({"approved":len(approved), "mismatch":len(approved-active), "pending":ai.execute("SELECT COUNT(*) FROM reviews WHERE ai_status IN ('pending','failed')").fetchone()[0]})
         ai.close()
+    active_rows = [dict(r) for r in conn.execute("SELECT * FROM tenders WHERE is_deleted=0 AND followup_status!='expired'")]
+    quality_issues: dict[str, int] = {}
+    for row in active_rows:
+        reason = quality_issue_reason(row, rules)
+        if reason:
+            quality_issues[reason] = quality_issues.get(reason, 0) + 1
+    report["quality"] = {"active_checked": len(active_rows), "deterministic_issues": quality_issues,
+                         "release_ready": not quality_issues and not [x for x in source_alerts if x["level"] == "error"]}
     text = json.dumps(report, ensure_ascii=False, indent=2)
     if args.output:
         output = Path(args.output); output.parent.mkdir(parents=True, exist_ok=True); output.write_text(text, encoding="utf-8")

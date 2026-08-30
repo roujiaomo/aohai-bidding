@@ -1,0 +1,9 @@
+[Unit]
+Description=Send Aohai Radar quality alert when required
+After=bidding-radar-quality-report.service network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/bidding-ai-radar
+EnvironmentFile=/etc/bidding-radar/dingtalk.env
+ExecStart=/usr/bin/python3.11 /opt/bidding-ai-radar/app/radar_quality_notify.py --report /opt/bidding-ai-radar/data/reports/quality-latest.json
