@@ -156,6 +156,15 @@ CREATE TABLE IF NOT EXISTS review_history(
  previous_reason_json TEXT DEFAULT '', previous_evidence_json TEXT DEFAULT '', archived_at TEXT NOT NULL,
  archive_reason TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS review_evaluations(
+ id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, review_id INTEGER NOT NULL,
+ mode TEXT NOT NULL, baseline_status TEXT DEFAULT '', baseline_bucket TEXT DEFAULT '',
+ candidate_status TEXT DEFAULT '', candidate_bucket TEXT DEFAULT '',
+ evidence_total INTEGER DEFAULT 0, evidence_verified INTEGER DEFAULT 0,
+ differs INTEGER NOT NULL DEFAULT 0, details_json TEXT DEFAULT '', error TEXT DEFAULT '', created_at TEXT NOT NULL,
+ UNIQUE(run_id, review_id)
+);
+CREATE INDEX IF NOT EXISTS idx_review_evaluations_run ON review_evaluations(run_id,id);
 """
 
 def now() -> str: return dt.datetime.now(dt.timezone(dt.timedelta(hours=8))).replace(microsecond=0).isoformat()
@@ -536,6 +545,62 @@ def deepseek(r: dict, conf: dict) -> tuple[dict, dict]:
     result = decide_from_facts(r, _fact_groups(result, corpus))
     usage=raw.get("usage",{}); meta={"input":int(usage.get("prompt_tokens",0)),"output":int(usage.get("completion_tokens",0)),"hit":int(usage.get("prompt_cache_hit_tokens",0))}
     meta["cost"]=estimate(meta["input"],meta["output"],meta["hit"]); return result,meta
+
+def facts_from_saved_review(r: dict) -> dict[str, list[dict]]:
+    """Reconstruct validated stage-one facts from a historical review.
+
+    Older records did not persist the first-stage envelope. This replay uses
+    only stored claims with source quotations and never invents missing facts.
+    """
+    try:
+        stored = json.loads(r.get("ai_reason_json") or "{}")
+    except Exception:
+        stored = {}
+    corpus = " ".join(str(r.get(k) or "") for k in ("title", "buyer", "region", "content"))
+    return {
+        "source_objects": validate_claims(stored.get("source_objects"), corpus, "name", require_text_in_quote=True),
+        "participation": [],
+        "business_scope": validate_claims(stored.get("reasons"), corpus),
+        "project_stage": [],
+        "exclusions": validate_claims([stored.get("exclude_reason")] if isinstance(stored.get("exclude_reason"), dict) else [], corpus),
+        "risks": validate_claims(stored.get("risk_notes"), corpus),
+    }
+
+
+def dual_run(limit: int, live: bool = False) -> dict:
+    """Compare a candidate decision without mutating any review conclusion.
+
+    Default replay has no model cost. Live mode is deliberately CLI-only and
+    stores the outcome in a separate immutable evaluation ledger.
+    """
+    conf = cfg(); c = conn(); run_id = f"{today()}-{'live' if live else 'replay'}-{now()[11:19].replace(':','')}"
+    selected = rows(c.execute("SELECT * FROM reviews WHERE ai_status IN ('approved','exclude','approved_manual','rejected_manual') ORDER BY id DESC LIMIT ?", (max(0, min(int(limit), 100)),)))
+    processed = differed = failed = verified = total = 0; errors: list[str] = []
+    for r in selected:
+        try:
+            if live:
+                candidate, meta = deepseek(r, conf)
+                c.execute("INSERT INTO api_usage(day,source_review_id,model,input_tokens,output_tokens,cache_hit_tokens,estimated_usd,created_at) VALUES(?,?,?,?,?,?,?,?)", (today(), r["id"], conf["model"], meta["input"], meta["output"], meta["hit"], meta["cost"], now()))
+                mode = "live_extraction"
+                evidence_total = evidence_verified = len(candidate.get("evidence", []))
+            else:
+                facts = facts_from_saved_review(r)
+                candidate = decide_from_facts(r, facts)
+                mode = "saved_evidence_replay"
+                evidence_total = sum(len(group) for group in facts.values())
+                evidence_verified = len(candidate.get("evidence", []))
+            baseline_bucket = str(r.get("bucket") or ("exclude" if r.get("ai_status") == "exclude" else ""))
+            differs = int(baseline_bucket != candidate["bucket"])
+            c.execute("""INSERT INTO review_evaluations(run_id,review_id,mode,baseline_status,baseline_bucket,candidate_status,candidate_bucket,evidence_total,evidence_verified,differs,details_json,created_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""", (run_id, r["id"], mode, r["ai_status"], baseline_bucket, "approved" if candidate["bucket"] != "exclude" else "exclude", candidate["bucket"], evidence_total, evidence_verified, differs, json.dumps({"policy_version": RULEBOOK_VERSION, "harness_version": AI_HARNESS_VERSION}, ensure_ascii=False), now()))
+            processed += 1; differed += differs; verified += evidence_verified; total += evidence_total
+        except Exception as exc:
+            c.execute("INSERT INTO review_evaluations(run_id,review_id,mode,baseline_status,baseline_bucket,error,created_at) VALUES(?,?,?,?,?,?,?)", (run_id, r["id"], "live_extraction" if live else "saved_evidence_replay", r["ai_status"], r.get("bucket", ""), str(exc)[:500], now()))
+            failed += 1; errors.append(str(exc)[:200])
+        c.commit()
+    c.close()
+    return {"run_id": run_id, "mode": "live_extraction" if live else "saved_evidence_replay", "selected": len(selected), "processed": processed, "differed": differed, "failed": failed, "errors": errors, "evidence_total": total, "evidence_verified": verified,
+            "notice": "仅写入双跑评测账本，未修改任何 AI 评审结论或商机展示。"}
 
 def analyze(limit: int) -> dict:
     conf=cfg()
@@ -1028,9 +1093,10 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e: self.send({"error":str(e)},500)
 
 def main():
-    ap=argparse.ArgumentParser(); ap.add_argument('--host',default='127.0.0.1'); ap.add_argument('--port',type=int,default=8791); ap.add_argument('--sync',action='store_true'); ap.add_argument('--analyze',type=int); a=ap.parse_args()
+    ap=argparse.ArgumentParser(); ap.add_argument('--host',default='127.0.0.1'); ap.add_argument('--port',type=int,default=8791); ap.add_argument('--sync',action='store_true'); ap.add_argument('--analyze',type=int); ap.add_argument('--dual-run',type=int,help='只写入双跑评测账本，不修改既有结论'); ap.add_argument('--live',action='store_true',help='与 --dual-run 一起使用时调用 DeepSeek；默认仅回放已验证证据'); a=ap.parse_args()
     if a.sync: print(sync_candidates()); return
     if a.analyze is not None: print(json.dumps(analyze(a.analyze),ensure_ascii=False)); return
+    if a.dual_run is not None: print(json.dumps(dual_run(a.dual_run, live=a.live),ensure_ascii=False)); return
     if auth_enabled():
         init_auth()
     ThreadingHTTPServer((a.host,a.port),Handler).serve_forever()

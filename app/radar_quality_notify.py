@@ -24,6 +24,8 @@ def collect_alerts(report: dict) -> list[str]:
     ai = report.get("ai", {})
     if ai.get("mismatch"):
         lines.append(f"- AI 展示一致性：发现 {ai['mismatch']} 条不一致")
+    if float(ai.get("failure_rate") or 0) >= 0.05:
+        lines.append(f"- AI 评审失败率：{float(ai['failure_rate']):.1%}（失败 {ai.get('failed', 0)} 条）")
     return lines
 
 

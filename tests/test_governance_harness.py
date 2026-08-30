@@ -45,5 +45,5 @@ class GovernanceHarnessTests(unittest.TestCase):
 
     def test_quality_alerts_only_include_actionable_findings(self):
         self.assertEqual(collect_alerts({"sources": {"alerts": []}, "quality": {"deterministic_issues": {}}, "ai": {"mismatch": 0}}), [])
-        alerts = collect_alerts({"sources": {"alerts": [{"source": "ccgp", "reason": "最近一次抓取失败"}]}, "quality": {"deterministic_issues": {"招聘/录用公告": 2}}, "ai": {"mismatch": 1}})
-        self.assertEqual(len(alerts), 3)
+        alerts = collect_alerts({"sources": {"alerts": [{"source": "ccgp", "reason": "最近一次抓取失败"}]}, "quality": {"deterministic_issues": {"招聘/录用公告": 2}}, "ai": {"mismatch": 1, "failure_rate": 0.1, "failed": 2}})
+        self.assertEqual(len(alerts), 4)

@@ -12,7 +12,7 @@ from copy import deepcopy
 from typing import Any
 
 
-RULEBOOK_VERSION = "2026.08.30-governance-v1"
+RULEBOOK_VERSION = "2026.08.30-governance-v2"
 AI_HARNESS_VERSION = "two-stage-v1"
 
 # These are the only display states a source tender may take in the formal

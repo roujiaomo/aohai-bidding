@@ -4988,6 +4988,17 @@ def cmd_quality_report(args):
             # 高频全量抓取通常会被去重；它值得保留给日报观察，但不是需要
             # 唤醒用户的故障。真正异常由连续失败、规则污染或 AI 不一致触发。
             source_observations.append({"source":code, "reason":"有返回但无新增或更新（可能为正常去重）", "finished_at":run.get("finished_at", "")})
+    # 仅在同一来源已有足够成功基线时判断“返回量突降”。这样不会把首次抓取、
+    # 节假日无公告或正常去重误报成生产事故。
+    history_by_source: dict[str, list[int]] = {}
+    for run in conn.execute("SELECT source_code,returned_count,status FROM fetch_runs WHERE status='success' ORDER BY id DESC LIMIT 1000"):
+        history_by_source.setdefault(run["source_code"], []).append(int(run["returned_count"] or 0))
+    for code, values in history_by_source.items():
+        current, baseline = values[0], [v for v in values[1:6] if v > 0]
+        if len(baseline) >= 3:
+            baseline.sort(); median = baseline[len(baseline) // 2]
+            if median >= 5 and current < max(1, median // 5):
+                source_alerts.append({"level":"warning", "source":code, "reason":f"返回量突降：本次 {current}，近期开奖中位数 {median}", "finished_at":latest_by_source.get(code, {}).get("finished_at", "")})
     report["sources"] = {
         "configured": conn.execute("SELECT COUNT(*) FROM sources").fetchone()[0],
         "runtime_failed": conn.execute("SELECT COUNT(*) FROM sources WHERE last_error IS NOT NULL AND last_error!=''").fetchone()[0],
@@ -4998,7 +5009,13 @@ def cmd_quality_report(args):
         ai = sqlite3.connect(f"file:{AI_REVIEW_DB}?mode=ro", uri=True)
         approved = {r[0] for r in ai.execute("SELECT source_tender_id FROM reviews WHERE ai_status IN ('approved','approved_manual')")}
         active = {r[0] for r in conn.execute("SELECT id FROM tenders WHERE is_deleted=0 AND followup_status!='expired'")}
-        report["ai"].update({"approved":len(approved), "mismatch":len(approved-active), "pending":ai.execute("SELECT COUNT(*) FROM reviews WHERE ai_status IN ('pending','failed')").fetchone()[0]})
+        statuses = {row[0]: row[1] for row in ai.execute("SELECT ai_status,COUNT(*) FROM reviews GROUP BY ai_status")}
+        completed = sum(statuses.get(name, 0) for name in ("approved", "exclude", "approved_manual", "rejected_manual"))
+        failed = statuses.get("failed", 0)
+        manual_events = ai.execute("SELECT COUNT(*) FROM review_events WHERE event_type='manual_decision'").fetchone()[0]
+        report["ai"].update({"approved":len(approved), "mismatch":len(approved-active), "pending":statuses.get("pending", 0) + failed,
+                             "failed":failed, "failure_rate":round(failed / max(1, completed + failed), 4),
+                             "manual_decisions":manual_events})
         ai.close()
     active_rows = [dict(r) for r in conn.execute("SELECT * FROM tenders WHERE is_deleted=0 AND followup_status!='expired'")]
     quality_issues: dict[str, int] = {}
