@@ -53,3 +53,9 @@ class RadarNotifyTests(unittest.TestCase):
             self.assertEqual(radar_notify.main(), 0)
         send.assert_not_called()
 
+    def test_connectivity_test_is_data_free(self):
+        with patch.dict("os.environ", {"DINGTALK_WEBHOOK_URL": "https://example.test", "DINGTALK_WEBHOOK_SECRET": "secret"}), patch("sys.argv", ["radar_notify.py", "--slot", "test", "--connectivity-test"]), patch.object(radar_notify, "send_markdown") as send:
+            self.assertEqual(radar_notify.main(), 0)
+        _, kwargs = send.call_args
+        self.assertEqual(kwargs, {})
+        self.assertIn("未包含任何商机数据", send.call_args.args[3])

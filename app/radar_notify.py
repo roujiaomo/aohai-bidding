@@ -145,7 +145,28 @@ def main() -> int:
     parser.add_argument("--review-db", type=Path, default=DEFAULT_REVIEW_DB)
     parser.add_argument("--slot", choices=("morning", "key", "test"), required=True)
     parser.add_argument("--dry-run", action="store_true", help="validate selection without sending DingTalk")
+    parser.add_argument(
+        "--connectivity-test",
+        action="store_true",
+        help="send a fixed data-free DingTalk message to verify the robot connection",
+    )
     args = parser.parse_args()
+
+    dashboard_url = os.environ.get("RADAR_DASHBOARD_URL", "http://39.96.217.93/radar-ai/")
+    if args.connectivity_test:
+        webhook = os.environ.get("DINGTALK_WEBHOOK_URL", "")
+        secret = os.environ.get("DINGTALK_WEBHOOK_SECRET", "")
+        if not webhook or not secret:
+            print("DINGTALK_WEBHOOK_URL and DINGTALK_WEBHOOK_SECRET must be set", file=sys.stderr)
+            return 2
+        send_markdown(
+            webhook,
+            secret,
+            "商机雷达测试",
+            "### 遨海商机雷达｜钉钉链路测试\n\n新版通知链路连接正常；本消息未包含任何商机数据。\n\n[打开新版商机雷达](%s)" % dashboard_url,
+        )
+        print("DingTalk connectivity test sent.")
+        return 0
 
     priorities = ("重点关注", "值得跟进") if args.slot in ("morning", "test") else ("重点关注",)
     try:
@@ -153,7 +174,6 @@ def main() -> int:
     except (OSError, sqlite3.Error, RuntimeError, ValueError) as exc:
         print(f"DingTalk notification selection failed: {exc}", file=sys.stderr)
         return 2
-    dashboard_url = os.environ.get("RADAR_DASHBOARD_URL", "http://39.96.217.93/radar-ai/")
     if args.dry_run:
         print(json.dumps({"slot": args.slot, "rows": len(rows), "titles": [r["title"] for r in rows], "dashboard_url": dashboard_url}, ensure_ascii=False))
         return 0
