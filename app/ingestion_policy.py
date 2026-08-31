@@ -9,6 +9,7 @@ from __future__ import annotations
 import re
 from typing import Any
 from urllib.parse import urlparse
+from governance import title_hard_exclusion_fact
 
 
 NON_OPPORTUNITY_TITLE_RE = re.compile(
@@ -33,14 +34,9 @@ def non_opportunity_reason(item: dict[str, Any]) -> str:
     title = str(item.get("title") or "").strip()
     if not title:
         return "标题为空"
-    if re.search(r"招聘|招录|考录|拟聘用|拟录用|录用|录取|面试|报到", title):
-        return "招聘/录用公告"
-    if re.search(r"废标|流标|终止公告|暂停公告|作废公告|合同公告|验收公告", title):
-        return "废标或履约阶段公告"
-    if re.search(r"环境影响(?:评价)?报告(?:书)?(?:全本)?(?:及.*)?公示|环评(?:报告)?(?:书)?(?:全本)?(?:及.*)?公示", title):
-        return "环评/公众参与公示"
-    if re.search(r"招租|房屋出租|商铺出租|资产出租|场地出租|经营权(?:出让|出租)", title):
-        return "资产招租/经营权信息"
+    hard_exclusion = title_hard_exclusion_fact(title)
+    if hard_exclusion:
+        return hard_exclusion["text"]
     # “北斗路、北斗镇”等地名不是卫星导航采购；有明确卫星/定位设备语义时才放行。
     if re.search(r"北斗(?:路|街|乡|镇|村|社区)", title) and not re.search(r"卫星|导航|定位|终端|授时|通信", title):
         return "地名北斗误匹配"

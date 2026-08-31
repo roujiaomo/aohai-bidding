@@ -31,7 +31,9 @@ class GovernanceHarnessTests(unittest.TestCase):
             record = sample["record"]
             content = record["content"]
             title = record["title"]
-            if "岸基AIS" in content:
+            if sample.get("facts"):
+                facts = sample["facts"]
+            elif "岸基AIS" in content:
                 facts = {"source_objects":[{"name":"岸基AIS系统","field":"公告正文","quote":"采购岸基AIS系统"}],"participation":[fact("投标截止", "投标截止2026年09月20日")],"business_scope":[fact("岸基AIS系统", "采购岸基AIS系统")],"project_stage":[fact("公开招标", "公开招标")],"exclusions":[],"risks":[]}
             elif "LED" in title:
                 facts = {"source_objects":[{"name":"LED灯器","field":"公告正文","quote":"LED灯器采购项目"}],"participation":[],"business_scope":[],"project_stage":[fact("中标结果", "中标结果公告")],"exclusions":[fact("普通 LED 灯器", "LED灯器采购项目")],"risks":[]}
@@ -106,6 +108,35 @@ class GovernanceHarnessTests(unittest.TestCase):
                  "project_stage": [fact("询比公告", "询比公告")], "exclusions": [], "risks": []}
         self.assertEqual(decide_from_facts(record, facts)["bucket"], "market_intelligence")
 
+    def test_raw_body_keywords_cannot_create_a_core_product(self):
+        record = {"title": "办公设备采购公告", "buyer": "海事局", "content": "采购打印机。网页背景资料介绍AIS船舶监管系统。投标截止2026年09月20日", "published_at": "2026-08-31", "deadline_at": "2026-09-20"}
+        facts = {"source_objects": [{"name": "打印机", "field": "采购需求", "quote": "采购打印机"}],
+                 "participation": [fact("投标截止", "投标截止2026年09月20日")],
+                 "business_scope": [], "project_stage": [fact("采购公告", "采购公告")], "exclusions": [], "risks": []}
+        self.assertEqual(decide_from_facts(record, facts)["bucket"], "exclude")
+
+    def test_raw_body_led_reference_cannot_exclude_verified_ais_object(self):
+        record = {"title": "岸基AIS系统采购公告", "buyer": "航标处", "content": "采购岸基AIS系统。安装应避开LED灯具线路。投标截止2026年09月20日", "published_at": "2026-08-31", "deadline_at": "2026-09-20"}
+        facts = {"source_objects": [{"name": "岸基AIS系统", "field": "采购需求", "quote": "采购岸基AIS系统"}],
+                 "participation": [fact("投标截止", "投标截止2026年09月20日")],
+                 "business_scope": [fact("海事通信", "岸基AIS系统")], "project_stage": [fact("采购公告", "采购公告")], "exclusions": [], "risks": []}
+        self.assertEqual(decide_from_facts(record, facts)["bucket"], "direct_opportunity")
+
+    def test_single_ais_word_is_not_a_core_product(self):
+        record = {"title": "数据分析服务采购公告", "buyer": "研究院", "content": "报告参考AIS数据。公开询比。", "published_at": "2026-08-31", "deadline_at": ""}
+        facts = {"source_objects": [{"name": "AIS", "field": "公告正文", "quote": "报告参考AIS数据"}],
+                 "participation": [fact("公开询比", "公开询比")], "business_scope": [],
+                 "project_stage": [fact("采购公告", "采购公告")], "exclusions": [], "risks": []}
+        self.assertEqual(decide_from_facts(record, facts)["bucket"], "exclude")
+
+    def test_closed_stage_fact_overrides_old_participation_sentence(self):
+        record = {"title": "岸基AIS系统采购成交结果公告", "buyer": "海事局", "content": "原招标文件写投标截止2026年09月20日，现发布成交结果", "published_at": "2026-08-31", "deadline_at": "2026-09-20"}
+        facts = {"source_objects": [{"name": "岸基AIS系统", "field": "采购项目名称", "quote": "岸基AIS系统采购"}],
+                 "participation": [fact("原投标截止", "投标截止2026年09月20日")],
+                 "business_scope": [fact("海事通信", "岸基AIS系统采购")],
+                 "project_stage": [fact("成交结果", "现发布成交结果")], "exclusions": [], "risks": []}
+        self.assertEqual(decide_from_facts(record, facts)["bucket"], "market_intelligence")
+
     def test_extraction_prompt_limits_fact_count_to_prevent_json_truncation(self):
         prompt = extraction_prompt_for({"title": "测试", "buyer": "", "region": "", "budget": "", "published_at": "", "deadline_at": "", "content": "正文"}, {"content_limit": 3000})
         self.assertIn("source_objects 最多2项", prompt)
@@ -132,3 +163,30 @@ class GovernanceHarnessTests(unittest.TestCase):
                 c.close()
         finally:
             ai_review.DB = original_db
+
+    def test_history_reanalysis_preserves_manual_decisions_and_old_snapshots(self):
+        import tempfile
+        original_db = ai_review.DB
+        original_deepseek = ai_review.deepseek
+        try:
+            with tempfile.TemporaryDirectory() as temp:
+                ai_review.DB = Path(temp) / "review.db"
+                c = ai_review.conn()
+                for idx, status in enumerate(("approved", "expired", "approved_manual"), start=1):
+                    c.execute("""INSERT INTO reviews(source_tender_id,title,keyword_score,content,ai_status,bucket,synced_at)
+                        VALUES(?,?,?,?,?,?,?)""", (idx, f"公告{idx}", 80, "采购岸基AIS系统", status, "market_intelligence", ai_review.now()))
+                c.commit(); c.close()
+                candidate = {"bucket":"direct_opportunity","project_type":"direct_product","supplier_lead":False,
+                             "fit_score":80,"confidence":0.9,"source_objects":[],"product_inferences":[],
+                             "reasons":[],"risk_notes":[],"exclude_reason":{},"evidence":[]}
+                ai_review.deepseek = lambda row, conf: (candidate, {"input":1,"output":1,"hit":0,"cost":0.0})
+                result = ai_review.reanalyze_history_records()
+                self.assertEqual((result["selected"], result["processed"], result["failed"]), (2, 2, 0))
+                c = ai_review.conn()
+                self.assertEqual(c.execute("SELECT COUNT(*) FROM reviews WHERE ai_status='approved_manual'").fetchone()[0], 1)
+                self.assertEqual(c.execute("SELECT COUNT(*) FROM reviews WHERE ai_status='approved'").fetchone()[0], 2)
+                self.assertEqual(c.execute("SELECT COUNT(*) FROM review_history").fetchone()[0], 2)
+                c.close()
+        finally:
+            ai_review.DB = original_db
+            ai_review.deepseek = original_deepseek

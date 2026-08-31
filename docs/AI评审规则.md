@@ -1,6 +1,8 @@
 # AI 评审规则（服务器当前口径）
 
-评审服务使用 `deepseek-v4-flash`，对评分达到候选线、未删除且未过期的公告进行两阶段处理。规则版本为 `2026.08.31-governance-v5`，Harness 版本为 `two-stage-v4-compact-json`。
+评审服务使用 `deepseek-v4-flash`，对评分达到候选线、未删除且未过期的公告进行两阶段处理。规则版本为 `2026.08.31-governance-v7`，Harness 版本为 `two-stage-v6-fact-object-decision`。
+
+DeepSeek 只负责抽取带逐字摘录的 `source_objects`、`participation`、`business_scope`、`project_stage`、`exclusions`、`risks`；程序负责最终裁决。公告全文只用于校验摘录真假，不直接参与分类。硬排除只读取公告标题和明确采购对象，核心产品只读取 `source_objects`，业务范围只读取 `business_scope`，参与入口只读取 `participation`。单独出现 AIS、VDES、合同、验收、LED 或“智慧航道”等词均不能独立决定通过或排除。
 
 1. DeepSeek 仅抽取可逐字验证的公告事实：采购对象、参与窗口、业务范围、项目阶段、排除事实和待核实事项；
 2. 程序再依据已验证事实、时效和硬规则裁决业务桶。模型不能直接决定“通过/排除”。
