@@ -63,8 +63,8 @@ CANONICAL_CAPABILITIES = (
 )
 POLICY_VIEW = {
     "direct": ["明确产品：海事场景下的 AIS、VDES、船站/船载终端、岸基站/通信基站、遥测遥控、ECDIS/INS、AIS数据与监管平台", "集成合作：仍可报名的智慧航道、VTS、智慧港口/海洋项目，且原文明确通信导航、通航安全、船舶信息或数据平台范围", "资格、业绩、授权、联合体和技术细节不全时保留直接商机，并标为待确认"],
-    "manual": ["航标/LED灯器及施工维护", "仅雷达、CCTV、北斗、VHF单品", "低轨监测、卫星总装、特殊资质/业绩/联合体要求"],
-    "exclude": ["电力AIS开关设备", "普通照明、保险、培训、会议", "施工监理、疏浚养护等非电子智能化交付", "成交结果或已指定供应商、无竞争机会项目"],
+    "manual": ["仅雷达、CCTV、北斗、VHF单品", "低轨监测、卫星总装、特殊资质/业绩/联合体要求", "集成项目的技术清单、资格或联合体条件需要人工核实"],
+    "exclude": ["电力AIS开关设备", "普通照明、LED 灯器、保险、培训、会议", "施工监理、疏浚养护等非电子智能化交付", "成交结果或已指定供应商、无竞争机会项目"],
 }
 
 class ReviewTextCleaner:
@@ -462,7 +462,7 @@ source_objects：公告明确采购的设备、软件、服务或项目对象，
 participation：公开招标、询比、谈判、报名、投标、递交、获取文件、截止、开标等参与窗口事实。
 business_scope：公告明确的海事通信、导航、船舶信息、通航安全、港航监管、航标遥测、船岸通信或数据平台范围；没有则空数组。
 project_stage：招标采购、结果成交、合同验收、可研设计、澄清等阶段事实。
-exclusions：招聘、招租、废标终止、合同验收、环评、电力AIS、普通照明等原文明确事实；没有则空数组。
+exclusions：招聘、招租、废标终止、合同验收、环评、电力AIS、普通照明、LED 灯器等原文明确事实；没有则空数组。
 risks：资格、联合体、保密、技术参数/采购清单缺失等需人工核实的原文事实；没有则空数组。
 必须只输出 JSON：{{"source_objects":[],"participation":[],"business_scope":[],"project_stage":[],"exclusions":[],"risks":[]}}。
 公告：标题={r['title']}；采购方={r['buyer']}；地区={r['region']}；预算={r['budget']}；发布时间={r['published_at']}；截止={r['deadline_at']}；正文={r['content'][:content_limit]}"""
@@ -480,15 +480,136 @@ def _fact_groups(payload: dict, corpus: str) -> dict[str, list[dict]]:
     }
 
 
+# This is intentionally narrower than a keyword score.  It is only used to
+# stop a conclusion that is already known to be incompatible with the
+# capability boundary from being displayed as a business opportunity.
+EXPLICIT_NON_CAPABILITY_PATTERN = re.compile(
+    r"普通\s*led|led\s*(?:灯|灯器|照明)|普通\s*照明|一般\s*照明",
+    re.I,
+)
+LEGACY_EXCLUSION_REASON_PATTERN = re.compile(
+    r"普通\s*led|led\s*(?:灯|灯器|照明)|普通\s*照明|"
+    r"与遨海(?:科技)?(?:能力)?(?:不匹配|无关)|明确排除",
+    re.I,
+)
+
+
+def deterministic_exclusion_fact(record: dict, facts: dict[str, list[dict]]) -> dict | None:
+    """Return a source-backed hard exclusion which the model cannot override.
+
+    The quote always comes from the title/body itself, so the final exclusion
+    remains reviewable even when the first-stage model failed to extract it.
+    """
+    title = str(record.get("title") or "")
+    content = str(record.get("content") or "")
+    for field, value in (("公告标题", title), ("公告正文", content)):
+        matched = EXPLICIT_NON_CAPABILITY_PATTERN.search(value)
+        if not matched:
+            continue
+        if field == "公告标题":
+            quote = title[:80]
+        else:
+            begin = max(0, matched.start() - 24)
+            quote = value[begin:matched.end() + 40].strip()[:80]
+        return {"text": "公告明确为普通照明或 LED 灯器采购，超出遨海可供货范围", "field": field, "quote": quote}
+    return None
+
+
+def _plain_reason_text(value: object) -> str:
+    if isinstance(value, dict):
+        return " ".join(_plain_reason_text(v) for v in value.values())
+    if isinstance(value, list):
+        return " ".join(_plain_reason_text(v) for v in value)
+    return str(value or "")
+
+
+def legacy_contradiction_candidates(c: sqlite3.Connection) -> list[dict]:
+    """Find only high-certainty legacy approved/exclude contradictions.
+
+    We do not reinterpret all historical market intelligence.  A candidate is
+    returned only when the saved legacy exclusion reason itself says that the
+    object is explicitly outside the capability boundary.  Manual decisions
+    are excluded from automatic repair.
+    """
+    candidates: list[dict] = []
+    for row in rows(c.execute("SELECT * FROM reviews WHERE ai_status='approved' ORDER BY id")):
+        # Versioned two-stage conclusions have a program decision and are not
+        # legacy data for this repair path.
+        if row.get("policy_version") or row.get("harness_version"):
+            continue
+        try:
+            reason = json.loads(row.get("ai_reason_json") or "{}")
+        except Exception:
+            continue
+        exclusion = reason.get("exclude_reason") if isinstance(reason, dict) else None
+        explanation = _plain_reason_text(exclusion)
+        if not explanation or not LEGACY_EXCLUSION_REASON_PATTERN.search(explanation):
+            continue
+        fact = deterministic_exclusion_fact(row, {"source_objects": [], "participation": [], "business_scope": [], "project_stage": [], "exclusions": [], "risks": []})
+        # A legacy text conclusion is sufficient for audit detection; repair
+        # additionally requires either an in-source deterministic fact or a
+        # properly quoted saved exclusion reason.
+        saved_has_quote = isinstance(exclusion, dict) and bool(exclusion.get("quote"))
+        if fact or saved_has_quote:
+            candidates.append({"review": row, "reason": reason, "exclusion": exclusion, "fact": fact, "explanation": explanation})
+    return candidates
+
+
+def audit_legacy_contradictions() -> dict:
+    c = conn()
+    found = legacy_contradiction_candidates(c)
+    c.close()
+    return {"mode": "preview_only", "count": len(found), "candidates": [{
+        "review_id": x["review"]["id"], "source_tender_id": x["review"]["source_tender_id"],
+        "title": x["review"]["title"], "ai_status": x["review"]["ai_status"],
+        "bucket": x["review"]["bucket"], "prompt_version": x["review"].get("prompt_version", ""),
+        "reason": x["explanation"],
+    } for x in found], "notice": "仅识别旧版文字明确排除、状态却为通过的高确定性矛盾；未修改数据库。"}
+
+
+def repair_legacy_contradictions() -> dict:
+    """Repair audited legacy contradictions without changing source tenders.
+
+    The old conclusion is retained in review_history.  Only an unconfirmed
+    legacy `approved` review becomes `exclude`; user-made decisions never go
+    through this automatic path.
+    """
+    c = conn(); found = legacy_contradiction_candidates(c); stamp = now(); repaired: list[dict] = []
+    for item in found:
+        row, reason, exclusion, fact = item["review"], item["reason"], item["exclusion"], item["fact"]
+        c.execute("""INSERT INTO review_history(review_id,previous_status,previous_label,previous_fit_score,previous_confidence,previous_reason_json,previous_evidence_json,archived_at,archive_reason)
+          VALUES(?,?,?,?,?,?,?,?,?)""", (row["id"], row["ai_status"], row["ai_label"], row["ai_fit_score"], row["ai_confidence"], row["ai_reason_json"], row["ai_evidence_json"], stamp, "旧版 AI 文字排除与通过状态矛盾：程序一致性修复"))
+        exclusion_claim = fact or (exclusion if isinstance(exclusion, dict) else {})
+        if not exclusion_claim.get("quote"):
+            # This branch is defensive only; candidates without traceable
+            # source evidence are not normally selected above.
+            continue
+        reason["reasons"] = []
+        reason["product_inferences"] = []
+        reason["exclude_reason"] = exclusion_claim
+        evidence = [{"field": exclusion_claim.get("field", "公告正文"), "quote": exclusion_claim["quote"]}]
+        updated = c.execute("""UPDATE reviews SET ai_status='exclude',ai_label='历史矛盾结论已修复',bucket='exclude',project_type='other',supplier_lead=0,ai_fit_score=0,ai_confidence=0.99,ai_reason_json=?,ai_evidence_json=?,policy_version=?,harness_version=?,error='',analyzed_at=? WHERE id=? AND ai_status='approved' AND COALESCE(policy_version,'')='' AND COALESCE(harness_version,'')=''""",
+                  (json.dumps(reason, ensure_ascii=False), json.dumps(evidence, ensure_ascii=False), RULEBOOK_VERSION, "legacy-consistency-repair-v1", stamp, row["id"]))
+        if updated.rowcount == 1:
+            c.execute("INSERT INTO review_events(review_id,event_type,from_status,to_status,policy_version,harness_version,details_json,created_at) VALUES(?,?,?,?,?,?,?,?)",
+                      (row["id"], "legacy_contradiction_repair", "approved", "exclude", RULEBOOK_VERSION, "legacy-consistency-repair-v1", json.dumps({"reason": item["explanation"], "source_preserved": True}, ensure_ascii=False), stamp))
+            repaired.append({"review_id": row["id"], "source_tender_id": row["source_tender_id"], "title": row["title"]})
+    c.commit(); c.close()
+    return {"repaired": len(repaired), "records": repaired, "notice": "仅变更 AI 派生评审状态和展示桶；原始商机、抓取数据、人工结论均未修改。"}
+
+
 def decide_from_facts(r: dict, facts: dict[str, list[dict]]) -> dict:
     """Stage 2: deterministic program decision over validated source facts."""
     evidence = evidence_from_claims(*facts.values())
+    deterministic_exclusion = deterministic_exclusion_fact(r, facts)
+    if deterministic_exclusion:
+        evidence.append({"field": deterministic_exclusion["field"], "quote": deterministic_exclusion["quote"]})
     title = str(r.get("title") or "")
     all_facts = " ".join(
         str(x.get("name") or x.get("text") or "") for group in facts.values() for x in group
     )
     lower = (title + " " + all_facts + " " + str(r.get("content") or "")).lower()
-    hard_excluded = bool(re.search(r"招聘|招录|录用|招租|废标|流标|终止|合同|验收|环评|空气绝缘|开关柜|变电|输配电|普通led|照明", lower))
+    hard_excluded = bool(deterministic_exclusion or re.search(r"招聘|招录|录用|招租|废标|流标|终止|合同|验收|环评|空气绝缘|开关柜|变电|输配电|普通led|照明", lower))
     has_scope = bool(facts["business_scope"] or facts["source_objects"])
     has_open = has_open_participation_evidence(r, facts["participation"])
     core_product = has_core_maritime_product(r)
@@ -500,7 +621,7 @@ def decide_from_facts(r: dict, facts: dict[str, list[dict]]) -> dict:
         return {"text": text, "field": item.get("field", "公告正文"), "quote": item.get("quote", title[:80])}
 
     if hard_excluded:
-        basis = (facts["exclusions"] or facts["project_stage"] or [{"field": "公告标题", "quote": title[:80]}])[0]
+        basis = deterministic_exclusion or (facts["exclusions"] or facts["project_stage"] or [{"field": "公告标题", "quote": title[:80]}])[0]
         return {"bucket": "exclude", "project_type": "other", "supplier_lead": False,
                 "fit_score": 0, "confidence": 0.96, "source_objects": facts["source_objects"],
                 "product_inferences": [], "reasons": [], "risk_notes": facts["risks"],
@@ -1093,10 +1214,12 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e: self.send({"error":str(e)},500)
 
 def main():
-    ap=argparse.ArgumentParser(); ap.add_argument('--host',default='127.0.0.1'); ap.add_argument('--port',type=int,default=8791); ap.add_argument('--sync',action='store_true'); ap.add_argument('--analyze',type=int); ap.add_argument('--dual-run',type=int,help='只写入双跑评测账本，不修改既有结论'); ap.add_argument('--live',action='store_true',help='与 --dual-run 一起使用时调用 DeepSeek；默认仅回放已验证证据'); a=ap.parse_args()
+    ap=argparse.ArgumentParser(); ap.add_argument('--host',default='127.0.0.1'); ap.add_argument('--port',type=int,default=8791); ap.add_argument('--sync',action='store_true'); ap.add_argument('--analyze',type=int); ap.add_argument('--dual-run',type=int,help='只写入双跑评测账本，不修改既有结论'); ap.add_argument('--live',action='store_true',help='与 --dual-run 一起使用时调用 DeepSeek；默认仅回放已验证证据'); ap.add_argument('--audit-legacy-contradictions',action='store_true',help='只读检查旧版文字排除却通过的矛盾结论'); ap.add_argument('--repair-legacy-contradictions',action='store_true',help='修复已审计的旧版高确定性矛盾结论'); a=ap.parse_args()
     if a.sync: print(sync_candidates()); return
     if a.analyze is not None: print(json.dumps(analyze(a.analyze),ensure_ascii=False)); return
     if a.dual_run is not None: print(json.dumps(dual_run(a.dual_run, live=a.live),ensure_ascii=False)); return
+    if a.audit_legacy_contradictions: print(json.dumps(audit_legacy_contradictions(),ensure_ascii=False)); return
+    if a.repair_legacy_contradictions: print(json.dumps(repair_legacy_contradictions(),ensure_ascii=False)); return
     if auth_enabled():
         init_auth()
     ThreadingHTTPServer((a.host,a.port),Handler).serve_forever()

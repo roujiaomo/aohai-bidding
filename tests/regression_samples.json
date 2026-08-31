@@ -2,6 +2,7 @@
   {"name":"公开 AIS 岸基站采购","record":{"title":"岸基AIS系统补点工程公开招标公告","buyer":"航海保障中心","content":"采购岸基AIS系统。获取招标文件至2026年09月10日，投标截止2026年09月20日","deadline_at":"2026-09-20"},"expected":"direct_opportunity"},
   {"name":"电力 AIS 开关柜","record":{"title":"AIS开关柜采购公告","buyer":"供电公司","content":"采购空气绝缘开关设备，公开招标","deadline_at":"2026-09-20"},"expected":"exclude"},
   {"name":"海事招聘","record":{"title":"海事局公开招聘工作人员公告","buyer":"海事局","content":"公开招聘","deadline_at":""},"expected":"exclude"},
+  {"name":"LED 灯器中标结果明确排除","record":{"title":"广州航标处LED灯器采购项目中标结果公告","buyer":"航海保障中心","content":"LED灯器采购项目中标结果公告","deadline_at":""},"expected":"exclude"},
   {"name":"已成交 AIS 项目","record":{"title":"AIS系统采购成交结果公告","buyer":"海事局","content":"AIS系统采购成交结果","deadline_at":""},"expected":"market_intelligence"},
   {"name":"相关但未公开设备清单","record":{"title":"智慧港口建设项目可行性研究报告编制","buyer":"港务集团","content":"开展港航数据平台可行性研究","deadline_at":""},"expected":"market_intelligence"}
 ]
