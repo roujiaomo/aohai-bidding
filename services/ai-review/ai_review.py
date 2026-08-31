@@ -20,7 +20,8 @@ from shared_auth import (LOGIN_HTML, auth_enabled, clear_cookies, csrf_valid, cu
 from governance import (AI_HARNESS_VERSION, DISPLAY_BUCKETS as GOVERNANCE_DISPLAY_BUCKETS,
                         RULEBOOK_VERSION, can_transition, concrete_business_scope_fact,
                         core_product_fact, integration_scope_fact, object_hard_exclusion_fact,
-                        title_hard_exclusion_fact, validate_extraction_shape)
+                        title_hard_exclusion_fact, title_source_object_fact,
+                        validate_extraction_shape)
 
 ROOT = Path(__file__).resolve().parent
 DB = ROOT / "data" / "ai_review.db"
@@ -64,9 +65,9 @@ CANONICAL_CAPABILITIES = (
     "船舶远程监控", "通航安全监控平台", "智慧渔港监管", "海洋牧场监控", "港航海事监管平台",
 )
 POLICY_VIEW = {
-    "direct": ["核心产品只读取经原文校验的采购对象 source_objects；单独出现 AIS、VDES 等词不构成命中", "公开参与入口只读取经原文校验的 participation，且必须仍在有效期内", "集成合作必须同时具备经校验的集成场景与具体业务范围；单独的“智慧航道”等项目名不够"],
+    "direct": ["核心产品只读取经原文校验的采购对象 source_objects；模型漏抽时仅可从带招采语义的标题补全完整产品短语，单独 AIS、VDES 不构成命中", "公开参与入口只读取经原文校验的 participation，且必须仍在有效期内；已标明截止/开标语义的事实可使用其纯日期摘录", "集成合作必须同时具备经校验的集成场景与具体业务范围；单独的“智慧航道”等项目名不够"],
     "manual": ["经校验的业务相关对象或具体范围存在，但缺少当前参与入口时归入市场情报", "中标/成交、可研设计、澄清等阶段事实只读取 project_stage，并归入市场情报", "资格、业绩、授权、联合体和技术细节作为待核实项，不凭单词自动通过或排除"],
-    "exclude": ["硬排除只读取公告标题阶段和经校验的明确采购对象", "合同履行、交付验收等正文条款不再触发合同/验收公告排除", "公告全文只用于核验摘录真假，不直接参与最终分类；没有可验证业务事实时排除"],
+    "exclude": ["硬排除只读取公告标题阶段和经校验的明确采购对象", "合同履行、交付验收等正文条款不再触发合同/验收公告排除", "公告全文只用于核验摘录真假，不直接参与最终分类；完整事实快照随结论保存，没有可验证业务事实时排除"],
 }
 
 class ReviewTextCleaner:
@@ -187,15 +188,15 @@ def deadline_has_passed(value: object) -> bool:
     # 同日截止仍有可能有效；从次日开始才算过期。
     return deadline < dt.date.today()
 
-def participation_datetimes(text: str) -> list[tuple[dt.datetime, bool]]:
-    """Extract source dates near acquiring, submission or opening language."""
+def participation_datetimes(text: str, require_context: bool = True) -> list[tuple[dt.datetime, bool]]:
+    """Extract dates from a participation fact; raw content requires context."""
     result: list[tuple[dt.datetime, bool]] = []
     date_re = re.compile(r"(20\d{2})[年./-](\d{1,2})[月./-](\d{1,2})(?:日)?(?:\s*(\d{1,2})(?:[:时点](\d{1,2})?)?(?:分)?)?")
     context_re = re.compile(r"截止|递交|提交响应文件|响应文件|投标文件|开标|获取(?:招标|采购)?文件")
     tz = dt.timezone(dt.timedelta(hours=8))
     for match in date_re.finditer(str(text or "")):
         context = text[max(0, match.start() - 70):match.end() + 70]
-        if not context_re.search(context):
+        if require_context and not context_re.search(context):
             continue
         try:
             has_time = match.group(4) is not None
@@ -366,7 +367,9 @@ def active_participation_evidence(record: dict, evidence: list[dict]) -> dict | 
     now_cn = dt.datetime.now(dt.timezone(dt.timedelta(hours=8)))
     dated: list[tuple[dt.datetime, dict]] = []
     for item in evidence:
-        for point, _ in participation_datetimes(str(item.get("quote") or "")):
+        semantic = " ".join(str(item.get(key) or "") for key in ("text", "field"))
+        is_participation_fact = bool(re.search(r"获取文件|响应截止|投标截止|递交|提交|开标|报名|公开招标|询比|询价|谈判|磋商", semantic, re.I))
+        for point, _ in participation_datetimes(str(item.get("quote") or ""), require_context=not is_participation_fact):
             dated.append((point, item))
     if dated:
         point, item = max(dated, key=lambda value: value[0])
@@ -477,9 +480,9 @@ risks：资格、联合体、保密、技术参数/采购清单缺失等需人�
 公告：标题={r['title']}；采购方={r['buyer']}；地区={r['region']}；预算={r['budget']}；发布时间={r['published_at']}；截止={r['deadline_at']}；正文={r['content'][:content_limit]}"""
 
 
-def _fact_groups(payload: dict, corpus: str) -> dict[str, list[dict]]:
+def _fact_groups(payload: dict, corpus: str, record: dict | None = None) -> dict[str, list[dict]]:
     """Accept only first-stage facts that can be tied to the source corpus."""
-    return {
+    facts = {
         "source_objects": validate_claims(payload.get("source_objects"), corpus, "name", require_text_in_quote=True),
         "participation": validate_claims(payload.get("participation"), corpus),
         "business_scope": validate_claims(payload.get("business_scope"), corpus),
@@ -487,6 +490,14 @@ def _fact_groups(payload: dict, corpus: str) -> dict[str, list[dict]]:
         "exclusions": validate_claims(payload.get("exclusions"), corpus),
         "risks": validate_claims(payload.get("risks"), corpus),
     }
+    # DeepSeek may omit an obvious object while extracting dates and risks.
+    # Complete only a full product phrase from a procurement-shaped title;
+    # never scan body text or promote a standalone keyword.
+    if record and core_product_fact(facts["source_objects"]) is None:
+        completed = title_source_object_fact(str(record.get("title") or ""))
+        if completed and completed["quote"] in corpus:
+            facts["source_objects"].append(completed)
+    return facts
 
 
 LEGACY_EXCLUSION_REASON_PATTERN = re.compile(
@@ -658,7 +669,9 @@ def deepseek(r: dict, conf: dict) -> tuple[dict, dict]:
     shape_error = validate_extraction_shape(result)
     if shape_error: raise RuntimeError(shape_error)
     corpus = " ".join(str(r[k] or "") for k in ("title", "buyer", "region", "content"))
-    result = decide_from_facts(r, _fact_groups(result, corpus))
+    facts = _fact_groups(result, corpus, r)
+    result = decide_from_facts(r, facts)
+    result["extracted_facts"] = facts
     usage=raw.get("usage",{}); meta={"input":int(usage.get("prompt_tokens",0)),"output":int(usage.get("completion_tokens",0)),"hit":int(usage.get("prompt_cache_hit_tokens",0))}
     meta["cost"]=estimate(meta["input"],meta["output"],meta["hit"]); return result,meta
 
@@ -673,6 +686,12 @@ def facts_from_saved_review(r: dict) -> dict[str, list[dict]]:
     except Exception:
         stored = {}
     corpus = " ".join(str(r.get(k) or "") for k in ("title", "buyer", "region", "content"))
+    extracted = stored.get("extracted_facts") if isinstance(stored, dict) else None
+    if isinstance(extracted, dict):
+        # v8+ persists the complete, source-validated first-stage envelope.
+        # Replays validate every quotation again so edited/corrupt snapshots
+        # cannot silently become decision facts.
+        return _fact_groups(extracted, corpus, r)
     return {
         "source_objects": validate_claims(stored.get("source_objects"), corpus, "name", require_text_in_quote=True),
         "participation": [],
@@ -751,7 +770,7 @@ def analyze(limit: int) -> dict:
             # 供后续人工结论和学习使用，不再制造重复的“待人工评审”队列。
             status={"direct_opportunity":"approved","market_intelligence":"approved","exclude":"exclude"}.get(result["bucket"],"approved")
             c.execute("""UPDATE reviews SET ai_status=?,ai_label='',bucket=?,project_type=?,supplier_lead=?,ai_fit_score=?,ai_confidence=?,ai_reason_json=?,ai_evidence_json=?,ai_model=?,profile_version=?,prompt_version=?,policy_version=?,harness_version=?,failure_count=0,input_tokens=?,output_tokens=?,cache_hit_tokens=?,estimated_usd=?,error='',analyzed_at=? WHERE id=?""",
-              (status,result["bucket"],result["project_type"],int(result["supplier_lead"]),int(result.get("fit_score",0)),float(result.get("confidence",0)),json.dumps({"source_objects":result.get("source_objects",[]),"product_inferences":result.get("product_inferences",[]),"reasons":result.get("reasons",[]),"risk_notes":result.get("risk_notes",[]),"exclude_reason":result.get("exclude_reason",{})},ensure_ascii=False),json.dumps(result.get("evidence",[]),ensure_ascii=False),conf["model"],conf["profile_version"],"aohai-review-v7-fact-object",RULEBOOK_VERSION,AI_HARNESS_VERSION,meta["input"],meta["output"],meta["hit"],meta["cost"],now(),r["id"]))
+              (status,result["bucket"],result["project_type"],int(result["supplier_lead"]),int(result.get("fit_score",0)),float(result.get("confidence",0)),json.dumps({"source_objects":result.get("source_objects",[]),"product_inferences":result.get("product_inferences",[]),"reasons":result.get("reasons",[]),"risk_notes":result.get("risk_notes",[]),"exclude_reason":result.get("exclude_reason",{}),"extracted_facts":result.get("extracted_facts",{})},ensure_ascii=False),json.dumps(result.get("evidence",[]),ensure_ascii=False),conf["model"],conf["profile_version"],"aohai-review-v8-fact-completion",RULEBOOK_VERSION,AI_HARNESS_VERSION,meta["input"],meta["output"],meta["hit"],meta["cost"],now(),r["id"]))
             c.execute("INSERT INTO api_usage(day,source_review_id,model,input_tokens,output_tokens,cache_hit_tokens,estimated_usd,created_at) VALUES(?,?,?,?,?,?,?,?)",(today(),r["id"],conf["model"],meta["input"],meta["output"],meta["hit"],meta["cost"],now())); done+=1
             c.execute("INSERT INTO review_events(review_id,event_type,from_status,to_status,policy_version,harness_version,details_json,created_at) VALUES(?,?,?,?,?,?,?,?)", (r["id"],"ai_decision",r["ai_status"],status,RULEBOOK_VERSION,AI_HARNESS_VERSION,json.dumps({"bucket":result["bucket"]},ensure_ascii=False),now()))
         except Exception as e:
@@ -824,7 +843,7 @@ def reanalyze_history_records() -> dict:
               VALUES(?,?,?,?,?,?,?,?,?)""", (r['id'],r['ai_status'],r['ai_label'],r['ai_fit_score'],r['ai_confidence'],r['ai_reason_json'],r['ai_evidence_json'],stamp,f'按 {RULEBOOK_VERSION} 全量历史重评'))
             status = "exclude" if result["bucket"] == "exclude" else "approved"
             c.execute("""UPDATE reviews SET ai_status=?,ai_label='',bucket=?,project_type=?,supplier_lead=?,ai_fit_score=?,ai_confidence=?,ai_reason_json=?,ai_evidence_json=?,ai_model=?,profile_version=?,prompt_version=?,policy_version=?,harness_version=?,failure_count=0,input_tokens=?,output_tokens=?,cache_hit_tokens=?,estimated_usd=?,error='',analyzed_at=? WHERE id=?""",
-              (status,result["bucket"],result["project_type"],int(result["supplier_lead"]),int(result.get("fit_score",0)),float(result.get("confidence",0)),json.dumps({"source_objects":result.get("source_objects",[]),"product_inferences":result.get("product_inferences",[]),"reasons":result.get("reasons",[]),"risk_notes":result.get("risk_notes",[]),"exclude_reason":result.get("exclude_reason",{})},ensure_ascii=False),json.dumps(result.get("evidence",[]),ensure_ascii=False),conf["model"],conf["profile_version"],"aohai-review-v7-fact-object",RULEBOOK_VERSION,AI_HARNESS_VERSION,meta["input"],meta["output"],meta["hit"],meta["cost"],now(),r["id"]))
+              (status,result["bucket"],result["project_type"],int(result["supplier_lead"]),int(result.get("fit_score",0)),float(result.get("confidence",0)),json.dumps({"source_objects":result.get("source_objects",[]),"product_inferences":result.get("product_inferences",[]),"reasons":result.get("reasons",[]),"risk_notes":result.get("risk_notes",[]),"exclude_reason":result.get("exclude_reason",{}),"extracted_facts":result.get("extracted_facts",{})},ensure_ascii=False),json.dumps(result.get("evidence",[]),ensure_ascii=False),conf["model"],conf["profile_version"],"aohai-review-v8-fact-completion",RULEBOOK_VERSION,AI_HARNESS_VERSION,meta["input"],meta["output"],meta["hit"],meta["cost"],now(),r["id"]))
             c.execute("INSERT INTO api_usage(day,source_review_id,model,input_tokens,output_tokens,cache_hit_tokens,estimated_usd,created_at) VALUES(?,?,?,?,?,?,?,?)",(today(),r["id"],conf["model"],meta["input"],meta["output"],meta["hit"],meta["cost"],now()))
             c.execute("INSERT INTO review_events(review_id,event_type,from_status,to_status,policy_version,harness_version,details_json,created_at) VALUES(?,?,?,?,?,?,?,?)", (r["id"],"historical_reanalysis",r["ai_status"],status,RULEBOOK_VERSION,AI_HARNESS_VERSION,json.dumps({"bucket":result["bucket"],"previous_preserved":True},ensure_ascii=False),now()))
             buckets[result["bucket"]] += 1

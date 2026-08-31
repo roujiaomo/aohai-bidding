@@ -15,6 +15,18 @@ class AiDualRunTests(unittest.TestCase):
                   "ai_reason_json": json.dumps({"source_objects": [{"name": "VDES岸基站", "field": "公告正文", "quote": "采购岸基AIS系统"}]}, ensure_ascii=False)}
         self.assertEqual(facts_from_saved_review(review)["source_objects"], [])
 
+    def test_saved_review_replay_uses_persisted_validated_fact_envelope(self):
+        facts = {"source_objects": [{"name": "岸基AIS系统", "field": "公告标题", "quote": "岸基AIS系统采购公告"}],
+                 "participation": [{"text": "响应截止", "field": "响应截止时间", "quote": "2026年09月20日"}],
+                 "business_scope": [], "project_stage": [], "exclusions": [], "risks": []}
+        review = {"title": "岸基AIS系统采购公告", "buyer": "", "region": "",
+                  "content": "响应截止时间为2026年09月20日",
+                  "deadline_at": "2026-09-20",
+                  "ai_reason_json": json.dumps({"extracted_facts": facts}, ensure_ascii=False)}
+        replay = facts_from_saved_review(review)
+        self.assertEqual(replay["source_objects"][0]["name"], "岸基AIS系统")
+        self.assertEqual(replay["participation"][0]["text"], "响应截止")
+
     def test_dual_run_writes_only_evaluation_ledger(self):
         original_db = ai_review.DB
         with tempfile.TemporaryDirectory() as temp:

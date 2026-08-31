@@ -4,7 +4,9 @@ import unittest
 from pathlib import Path
 
 sys.path[:0] = ["services/ai-review", "app"]
-from ai_review import decide_from_facts, audit_legacy_contradictions, repair_legacy_contradictions, extraction_prompt_for
+from ai_review import (decide_from_facts, audit_legacy_contradictions,
+                       repair_legacy_contradictions, extraction_prompt_for,
+                       _fact_groups, active_participation_evidence)
 import ai_review
 from governance import can_transition, effective_rulebook, validate_extraction_shape
 from radar_quality_notify import collect_alerts
@@ -128,6 +130,30 @@ class GovernanceHarnessTests(unittest.TestCase):
                  "participation": [fact("公开询比", "公开询比")], "business_scope": [],
                  "project_stage": [fact("采购公告", "采购公告")], "exclusions": [], "risks": []}
         self.assertEqual(decide_from_facts(record, facts)["bucket"], "exclude")
+
+    def test_procurement_title_completes_only_a_full_core_product_phrase(self):
+        record = {"title": "高港船闸AIS岸基基站设备采购公告（二次）", "buyer": "船闸管理处",
+                  "region": "江苏", "content": "投标截止时间：2026年09月20日", "deadline_at": "2026-09-20"}
+        corpus = " ".join(str(record.get(k) or "") for k in ("title", "buyer", "region", "content"))
+        payload = {"source_objects": [], "participation": [fact("投标截止", "投标截止时间：2026年09月20日")],
+                   "business_scope": [], "project_stage": [], "exclusions": [], "risks": []}
+        facts = _fact_groups(payload, corpus, record)
+        self.assertEqual(facts["source_objects"][0]["name"], "AIS岸基基站")
+        self.assertEqual(decide_from_facts(record, facts)["bucket"], "direct_opportunity")
+
+    def test_title_completion_never_promotes_standalone_ais_or_background_text(self):
+        for record in (
+            {"title": "AIS相关数据研究", "buyer": "研究院", "region": "", "content": "AIS", "deadline_at": ""},
+            {"title": "办公设备采购公告", "buyer": "海事局", "region": "", "content": "背景资料介绍岸基AIS系统", "deadline_at": ""},
+        ):
+            corpus = " ".join(str(record.get(k) or "") for k in ("title", "buyer", "region", "content"))
+            facts = _fact_groups({"source_objects": [], "participation": [], "business_scope": [], "project_stage": [], "exclusions": [], "risks": []}, corpus, record)
+            self.assertEqual(facts["source_objects"], [])
+
+    def test_semantic_participation_fact_accepts_a_verified_date_only_quote(self):
+        record = {"title": "集成型插卡式AIS竞争性谈判公告", "published_at": "2026-08-31", "deadline_at": "2026-09-11"}
+        item = {"text": "响应截止", "field": "响应截止时间", "quote": "2026年09月11日 09点00分"}
+        self.assertEqual(active_participation_evidence(record, [item]), item)
 
     def test_closed_stage_fact_overrides_old_participation_sentence(self):
         record = {"title": "岸基AIS系统采购成交结果公告", "buyer": "海事局", "content": "原招标文件写投标截止2026年09月20日，现发布成交结果", "published_at": "2026-08-31", "deadline_at": "2026-09-20"}

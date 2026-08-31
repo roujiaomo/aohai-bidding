@@ -13,8 +13,8 @@ from copy import deepcopy
 from typing import Any
 
 
-RULEBOOK_VERSION = "2026.08.31-governance-v7"
-AI_HARNESS_VERSION = "two-stage-v6-fact-object-decision"
+RULEBOOK_VERSION = "2026.08.31-governance-v8"
+AI_HARNESS_VERSION = "two-stage-v7-deterministic-fact-completion"
 
 # One shared, structured policy is consumed by ingestion, AI review, tests and
 # the rule/help views.  Raw announcement content is deliberately absent from
@@ -35,7 +35,7 @@ NON_CAPABILITY_OBJECT_RULES = (
 )
 
 CORE_PRODUCT_RE = re.compile(
-    r"岸基\s*AIS|船载\s*AIS|插卡(?:式)?\s*AIS|AIS\s*(?:系统|基站|岸基站|船载终端|终端|设备|实体航标|配备|核心网|数据)|"
+    r"岸基\s*AIS|船载\s*AIS|插卡(?:式)?\s*AIS|AIS\s*(?:系统|岸基基站|基站|岸基站|船载终端|终端|设备|实体航标|配备|核心网|数据)|"
     r"VDES\s*(?:系统|基站|岸基站|船载终端|终端|设备|核心网|卫星载荷)|"
     r"船站|船载终端|岸基站|船岸(?:通信|无线)|航标遥测|航标遥控|ECDIS|电子海图|INS\s*综合导航|AIS\s*大数据",
     re.I,
@@ -85,6 +85,21 @@ def core_product_fact(source_objects: list[dict[str, Any]]) -> dict[str, Any] | 
         if CORE_PRODUCT_RE.search(value):
             return item
     return None
+
+
+def title_source_object_fact(title: str) -> dict[str, str] | None:
+    """Complete a missed source object only from a procurement-shaped title.
+
+    This is deterministic fact extraction, not classification: the complete
+    product phrase and procurement/stage language must both be present.  A
+    standalone keyword such as AIS can never create this fact.
+    """
+    if not re.search(r"采购|招标|询价|询比|谈判|磋商|配备项目|建设工程|升级改造", title or "", re.I):
+        return None
+    match = CORE_PRODUCT_RE.search(title or "")
+    if not match:
+        return None
+    return {"name": match.group(0), "field": "公告标题", "quote": (title or "")[:80], "fact_source": "program_title_completion"}
 
 
 def concrete_business_scope_fact(business_scope: list[dict[str, Any]]) -> dict[str, Any] | None:
