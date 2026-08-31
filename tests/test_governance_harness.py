@@ -6,7 +6,8 @@ from pathlib import Path
 sys.path[:0] = ["services/ai-review", "app"]
 from ai_review import (decide_from_facts, audit_legacy_contradictions,
                        repair_legacy_contradictions, extraction_prompt_for,
-                       _fact_groups, active_participation_evidence)
+                       _fact_groups, active_participation_evidence,
+                       validated_recommendation)
 import ai_review
 from governance import can_transition, effective_rulebook, validate_extraction_shape
 from radar_quality_notify import collect_alerts
@@ -26,6 +27,82 @@ class GovernanceHarnessTests(unittest.TestCase):
 
     def test_extraction_schema_requires_every_fact_group(self):
         self.assertIn("必须是数组", validate_extraction_shape({"source_objects": []}))
+
+    def test_extraction_schema_requires_grounded_business_recommendation(self):
+        payload = {"source_objects": [], "participation": [], "business_scope": [],
+                   "project_stage": [], "exclusions": [], "risks": [],
+                   "recommendation": {"bucket": "market_intelligence", "reason": "业务相关", "confidence": 0.7, "basis_quotes": []}}
+        self.assertIn("basis_quotes", validate_extraction_shape(payload))
+
+    def test_light_harness_accepts_grounded_market_recommendation_without_dictionary_hit(self):
+        record = {"title": "航道日常养护服务公开招标公告", "buyer": "海事局", "content": "采购航道日常养护服务", "deadline_at": ""}
+        facts = {"source_objects": [fact("航道日常养护服务", "采购航道日常养护服务")],
+                 "participation": [fact("公开招标", "航道日常养护服务公开招标公告")],
+                 "business_scope": [], "project_stage": [fact("招标公告", "航道日常养护服务公开招标公告")],
+                 "exclusions": [], "risks": []}
+        recommendation = {"bucket": "market_intelligence", "reason": "属于港航相关服务，建议保留观察",
+                          "confidence": 0.68, "basis_quotes": ["采购航道日常养护服务"], "basis": facts["source_objects"][0]}
+        self.assertEqual(decide_from_facts(record, facts, recommendation)["bucket"], "market_intelligence")
+
+    def test_light_harness_softens_model_exclusion_when_core_product_is_verified(self):
+        record = {"title": "岸基AIS系统采购公告", "buyer": "航保中心", "content": "采购岸基AIS系统", "deadline_at": ""}
+        facts = {"source_objects": [{"name": "岸基AIS系统", "field": "采购需求", "quote": "采购岸基AIS系统"}],
+                 "participation": [], "business_scope": [], "project_stage": [], "exclusions": [], "risks": []}
+        recommendation = {"bucket": "exclude", "reason": "信息不足", "confidence": 0.6,
+                          "basis_quotes": ["采购岸基AIS系统"], "basis": facts["source_objects"][0]}
+        self.assertEqual(decide_from_facts(record, facts, recommendation)["bucket"], "market_intelligence")
+
+    def test_recommendation_basis_must_be_verbatim_source_text(self):
+        facts = {"source_objects": [], "participation": [], "business_scope": [], "project_stage": [], "exclusions": [], "risks": []}
+        payload = {"recommendation": {"bucket": "market_intelligence", "reason": "可能相关", "confidence": 0.6,
+                                      "basis_quotes": ["模型编造的原文"]}}
+        with self.assertRaisesRegex(RuntimeError, "未绑定"):
+            validated_recommendation(payload, "测试公告 网页背景中的海事字样", facts, "测试公告")
+
+    def test_recommendation_accepts_a_separately_validated_source_quote(self):
+        title = "航道服务采购公告"
+        corpus = title + " 采购范围详见技术需求书"
+        facts = {"source_objects": [], "participation": [], "business_scope": [], "project_stage": [], "exclusions": [], "risks": []}
+        payload = {"recommendation": {"bucket": "market_intelligence", "reason": "采购清单尚待核实",
+                                      "confidence": 0.6, "basis_quotes": ["采购范围详见技术需求书"]}}
+        result = validated_recommendation(payload, corpus, facts, title)
+        self.assertEqual(result["basis"]["quote"], "采购范围详见技术需求书")
+
+    def test_recommendation_accepts_cleaned_exact_title_quote(self):
+        title = "航道综合开发工程（码头工程）勘察设计招标公告"
+        facts = {"source_objects": [], "participation": [], "business_scope": [], "project_stage": [], "exclusions": [], "risks": []}
+        payload = {"recommendation": {"bucket": "market_intelligence", "reason": "航道工程设计属于行业前期情报",
+                                      "confidence": 0.6, "basis_quotes": [title]}}
+        result = validated_recommendation(payload, title, facts, title)
+        self.assertEqual(result["bucket"], "market_intelligence")
+
+    def test_recommendation_accepts_source_quote_with_punctuation_only_difference(self):
+        title = "航道综合开发工程（码头工程）勘察设计招标公告"
+        facts = {"source_objects": [], "participation": [], "business_scope": [], "project_stage": [], "exclusions": [], "risks": []}
+        payload = {"recommendation": {"bucket": "market_intelligence", "reason": "航道工程设计属于行业前期情报",
+                                      "confidence": 0.6, "basis_quotes": ["航道综合开发工程码头工程勘察设计招标公告"]}}
+        result = validated_recommendation(payload, title, facts, title)
+        self.assertEqual(result["bucket"], "market_intelligence")
+
+    def test_invalid_model_basis_is_rebound_to_a_verified_fact(self):
+        title = "航道疏浚施工招标公告"
+        facts = {"source_objects": [
+                    {"name": "航道疏浚施工", "field": "公告标题", "quote": title}],
+                 "participation": [], "business_scope": [], "project_stage": [],
+                 "exclusions": [], "risks": []}
+        payload = {"recommendation": {"bucket": "exclude", "reason": "与公司业务无关",
+                                      "confidence": 0.8, "basis_quotes": ["模型改写且原文不存在"]}}
+        result = validated_recommendation(payload, title, facts, title)
+        self.assertEqual(result["basis"]["quote"], title)
+        self.assertIn("航道疏浚施工", result["reason"])
+
+    def test_invalid_market_basis_without_any_verified_fact_still_fails(self):
+        payload = {"recommendation": {"bucket": "market_intelligence", "reason": "可能相关",
+                                      "confidence": 0.6, "basis_quotes": ["模型改写且原文不存在"]}}
+        facts = {"source_objects": [], "participation": [], "business_scope": [],
+                 "project_stage": [], "exclusions": [], "risks": []}
+        with self.assertRaisesRegex(RuntimeError, "未绑定"):
+            validated_recommendation(payload, "普通网页内容", facts, "普通网页")
 
     def test_regression_cases(self):
         samples = json.loads((Path(__file__).parent / "regression_samples.json").read_text(encoding="utf-8"))
@@ -48,7 +125,7 @@ class GovernanceHarnessTests(unittest.TestCase):
             else:
                 facts = {"source_objects":[],"participation":[],"business_scope":[fact("港航数据平台")],"project_stage":[fact("可行性研究", "可行性研究")],"exclusions":[],"risks":[]}
             with self.subTest(sample=sample["name"]):
-                self.assertEqual(decide_from_facts(record, facts)["bucket"], sample["expected"])
+                self.assertEqual(decide_from_facts(record, facts, sample.get("recommendation"))["bucket"], sample["expected"])
 
     def test_quality_alerts_only_include_actionable_findings(self):
         self.assertEqual(collect_alerts({"sources": {"alerts": []}, "quality": {"deterministic_issues": {}}, "ai": {"mismatch": 0}}), [])
@@ -150,6 +227,22 @@ class GovernanceHarnessTests(unittest.TestCase):
             facts = _fact_groups({"source_objects": [], "participation": [], "business_scope": [], "project_stage": [], "exclusions": [], "risks": []}, corpus, record)
             self.assertEqual(facts["source_objects"], [])
 
+    def test_open_procurement_title_completes_missing_participation_fact(self):
+        title = "岸基AIS系统升级改造项目公开招标公告"
+        record = {"title": title, "buyer": "海事局", "region": "", "content": "采购岸基AIS系统", "deadline_at": "2099-09-20", "published_at": "2099-08-31"}
+        corpus = " ".join(str(record.get(k) or "") for k in ("title", "buyer", "region", "content"))
+        payload = {"source_objects": [{"name": "岸基AIS系统", "field": "采购需求", "quote": "采购岸基AIS系统"}],
+                   "participation": [], "business_scope": [], "project_stage": [], "exclusions": [], "risks": []}
+        facts = _fact_groups(payload, corpus, record)
+        self.assertEqual(facts["participation"][0]["text"], "公开招标公告")
+
+    def test_result_title_never_completes_participation_fact(self):
+        title = "岸基AIS系统公开招标中标结果公告"
+        record = {"title": title, "buyer": "海事局", "region": "", "content": "中标结果", "deadline_at": "", "published_at": ""}
+        corpus = " ".join(str(record.get(k) or "") for k in ("title", "buyer", "region", "content"))
+        payload = {"source_objects": [], "participation": [], "business_scope": [], "project_stage": [], "exclusions": [], "risks": []}
+        self.assertEqual(_fact_groups(payload, corpus, record)["participation"], [])
+
     def test_semantic_participation_fact_accepts_a_verified_date_only_quote(self):
         record = {"title": "集成型插卡式AIS竞争性谈判公告", "published_at": "2026-08-31", "deadline_at": "2026-09-11"}
         item = {"text": "响应截止", "field": "响应截止时间", "quote": "2026年09月11日 09点00分"}
@@ -167,6 +260,7 @@ class GovernanceHarnessTests(unittest.TestCase):
         prompt = extraction_prompt_for({"title": "测试", "buyer": "", "region": "", "budget": "", "published_at": "", "deadline_at": "", "content": "正文"}, {"content_limit": 3000})
         self.assertIn("source_objects 最多2项", prompt)
         self.assertIn("最长60字", prompt)
+        self.assertIn("证据不足不等于业务无关", prompt)
 
     def test_full_dual_run_covers_every_persisted_review_without_changing_conclusions(self):
         import tempfile
@@ -186,6 +280,56 @@ class GovernanceHarnessTests(unittest.TestCase):
                 c = ai_review.conn()
                 self.assertEqual(c.execute("SELECT COUNT(*) FROM review_evaluations WHERE run_id=?", (result["run_id"],)).fetchone()[0], 4)
                 self.assertEqual(c.execute("SELECT COUNT(*) FROM reviews WHERE ai_status='approved_manual'").fetchone()[0], 1)
+                c.close()
+        finally:
+            ai_review.DB = original_db
+
+    def test_live_dual_run_retries_like_formal_review(self):
+        import tempfile
+        original_db = ai_review.DB
+        original_deepseek = ai_review.deepseek
+        calls = {"count": 0}
+        try:
+            with tempfile.TemporaryDirectory() as temp:
+                ai_review.DB = Path(temp) / "review.db"
+                c = ai_review.conn()
+                c.execute("""INSERT INTO reviews(source_tender_id,title,keyword_score,content,ai_status,bucket,synced_at)
+                    VALUES(?,?,?,?,?,?,?)""", (1, "岸基AIS采购公告", 80, "采购岸基AIS系统", "exclude", "exclude", ai_review.now()))
+                c.commit(); c.close()
+                candidate = {"bucket": "market_intelligence", "project_type": "other", "supplier_lead": False,
+                             "fit_score": 45, "confidence": 0.7, "source_objects": [], "product_inferences": [],
+                             "reasons": [], "risk_notes": [], "exclude_reason": {}, "evidence": []}
+                def flaky(_row, _conf):
+                    calls["count"] += 1
+                    if calls["count"] == 1:
+                        raise RuntimeError("模型格式失败")
+                    return candidate, {"input": 1, "output": 1, "hit": 0, "cost": 0.0}
+                ai_review.deepseek = flaky
+                result = ai_review.dual_run(1, live=True)
+                self.assertEqual((result["processed"], result["failed"], calls["count"]), (1, 0, 2))
+        finally:
+            ai_review.DB = original_db
+            ai_review.deepseek = original_deepseek
+
+    def test_targeted_dual_run_only_evaluates_selected_review_ids(self):
+        import tempfile
+        original_db = ai_review.DB
+        try:
+            with tempfile.TemporaryDirectory() as temp:
+                ai_review.DB = Path(temp) / "review.db"
+                c = ai_review.conn()
+                for idx in range(1, 4):
+                    c.execute("""INSERT INTO reviews(source_tender_id,title,keyword_score,content,ai_status,bucket,synced_at)
+                        VALUES(?,?,?,?,?,?,?)""", (idx, f"公告{idx}", 10, "采购岸基AIS系统", "exclude", "exclude", ai_review.now()))
+                c.commit(); c.close()
+                result = ai_review.dual_run(None, live=False, review_ids=[3, 1, 3])
+                self.assertEqual((result["scope"], result["selected"], result["processed"]),
+                                 ("selected_review_ids", 2, 2))
+                c = ai_review.conn()
+                evaluated = [row[0] for row in c.execute(
+                    "SELECT review_id FROM review_evaluations WHERE run_id=? ORDER BY review_id", (result["run_id"],))]
+                self.assertEqual(evaluated, [1, 3])
+                self.assertEqual(c.execute("SELECT COUNT(*) FROM reviews").fetchone()[0], 3)
                 c.close()
         finally:
             ai_review.DB = original_db

@@ -13,8 +13,8 @@ from copy import deepcopy
 from typing import Any
 
 
-RULEBOOK_VERSION = "2026.08.31-governance-v8"
-AI_HARNESS_VERSION = "two-stage-v7-deterministic-fact-completion"
+RULEBOOK_VERSION = "2026.08.31-governance-v9"
+AI_HARNESS_VERSION = "two-stage-v8-lightweight-guardrails"
 
 # One shared, structured policy is consumed by ingestion, AI review, tests and
 # the rule/help views.  Raw announcement content is deliberately absent from
@@ -102,6 +102,18 @@ def title_source_object_fact(title: str) -> dict[str, str] | None:
     return {"name": match.group(0), "field": "公告标题", "quote": (title or "")[:80], "fact_source": "program_title_completion"}
 
 
+def title_participation_fact(title: str) -> dict[str, str] | None:
+    """Complete an explicit open-procurement stage from the verified title."""
+    value = title or ""
+    if re.search(r"中标|成交|结果|候选人|合同|验收|终止|废标|流标|澄清", value, re.I):
+        return None
+    match = re.search(r"公开招标公告|竞争性谈判公告|竞争性磋商公告|询比公告|询价公告|采购公告|招标公告", value, re.I)
+    if not match:
+        return None
+    return {"text": match.group(0), "field": "公告标题", "quote": value[:80],
+            "fact_source": "program_title_participation_completion"}
+
+
 def concrete_business_scope_fact(business_scope: list[dict[str, Any]]) -> dict[str, Any] | None:
     """Find concrete business scope; generic smart-project names do not count."""
     return next((item for item in business_scope if CONCRETE_SCOPE_RE.search(_fact_value(item))), None)
@@ -133,7 +145,7 @@ EVIDENCE_FIELDS = frozenset({
 
 AI_EXTRACTION_SCHEMA = {
     "type": "object",
-    "required": ["source_objects", "participation", "business_scope", "project_stage", "exclusions", "risks"],
+    "required": ["source_objects", "participation", "business_scope", "project_stage", "exclusions", "risks", "recommendation"],
     "properties": {
         "source_objects": "array[{name,field,quote}]",          # 原文明确采购对象
         "participation": "array[{text,field,quote}]",           # 报名/投标/截止等参与证据
@@ -141,6 +153,7 @@ AI_EXTRACTION_SCHEMA = {
         "project_stage": "array[{text,field,quote}]",           # 招标、结果、可研等阶段事实
         "exclusions": "array[{text,field,quote}]",              # 仅原文明确的排除事实
         "risks": "array[{text,field,quote}]",                   # 资格、清单不足等待核实事实
+        "recommendation": "{bucket,reason,confidence,basis_quotes}", # 模型业务建议；程序只做护栏校验
     },
 }
 
@@ -169,6 +182,19 @@ def validate_extraction_shape(payload: object) -> str:
     if not isinstance(payload, dict):
         return "第一阶段输出必须是对象"
     for key in AI_EXTRACTION_SCHEMA["required"]:
+        if key == "recommendation":
+            recommendation = payload.get(key)
+            if not isinstance(recommendation, dict):
+                return "第一阶段字段 recommendation 必须是对象"
+            if recommendation.get("bucket") not in AI_BUCKETS:
+                return "recommendation.bucket 必须是 direct_opportunity、market_intelligence 或 exclude"
+            if not isinstance(recommendation.get("reason"), str) or not recommendation.get("reason", "").strip():
+                return "recommendation.reason 必须是非空中文说明"
+            if not re.search(r"[\u4e00-\u9fff]", recommendation.get("reason", "")):
+                return "recommendation.reason 必须包含中文说明"
+            if not isinstance(recommendation.get("basis_quotes"), list) or not recommendation.get("basis_quotes"):
+                return "recommendation.basis_quotes 必须是非空数组"
+            continue
         if not isinstance(payload.get(key), list):
             return f"第一阶段字段 {key} 必须是数组"
     return ""
