@@ -185,27 +185,37 @@ def deadline_has_passed(value: object) -> bool:
     # 同日截止仍有可能有效；从次日开始才算过期。
     return deadline < dt.date.today()
 
+def participation_datetimes(text: str) -> list[tuple[dt.datetime, bool]]:
+    """Extract source dates near acquiring, submission or opening language."""
+    result: list[tuple[dt.datetime, bool]] = []
+    date_re = re.compile(r"(20\d{2})[年./-](\d{1,2})[月./-](\d{1,2})(?:日)?(?:\s*(\d{1,2})(?:[:时点](\d{1,2})?)?(?:分)?)?")
+    context_re = re.compile(r"截止|递交|提交响应文件|响应文件|投标文件|开标|获取(?:招标|采购)?文件")
+    tz = dt.timezone(dt.timedelta(hours=8))
+    for match in date_re.finditer(str(text or "")):
+        context = text[max(0, match.start() - 70):match.end() + 70]
+        if not context_re.search(context):
+            continue
+        try:
+            has_time = match.group(4) is not None
+            hour = int(match.group(4) or 23)
+            minute = int(match.group(5) or (0 if has_time else 59))
+            second = 0 if has_time else 59
+            result.append((dt.datetime(int(match.group(1)), int(match.group(2)), int(match.group(3)), hour, minute, second, tzinfo=tz), has_time))
+        except ValueError:
+            continue
+    return result
+
 def tender_has_passed_deadline(record: dict | sqlite3.Row) -> bool:
     """优先用结构化截止日；缺失时从公告正文中识别“截止/递交/开标”日期。"""
     if deadline_has_passed(record["deadline_at"]):
         return True
     content = str(record["content"] or "")
-    # 只取截止、递交、响应或开标语境附近的日期，避免把发布日期误判为截止日。
-    patterns = (
-        r"(?:截止|递交|响应文件提交|投标文件提交|开标)[^。；;]{0,80}?(20\d{2})[年./-](\d{1,2})[月./-](\d{1,2})",
-        r"(20\d{2})[年./-](\d{1,2})[月./-](\d{1,2})[^。；;]{0,80}?(?:截止|递交|开标)",
-    )
     # 同一公告常同时出现“获取文件截止日”和真正的投标/开标日。旧逻辑只要
     # 命中任一较早日期就判过期，会把仍可投标的公告错误归档。收集所有语境日期，
     # 以最晚日期作为有效参与窗口的保守上界。
-    candidates: list[dt.date] = []
-    for pattern in patterns:
-        for found in re.finditer(pattern, content):
-            try:
-                candidates.append(dt.date(*map(int, found.groups())))
-            except ValueError:
-                continue
-    return bool(candidates) and max(candidates) < dt.date.today()
+    candidates = participation_datetimes(content)
+    now_cn = dt.datetime.now(dt.timezone(dt.timedelta(hours=8)))
+    return bool(candidates) and max(point for point, _ in candidates) < now_cn
 
 def source_auto_expire_days() -> int:
     """从雷达配置读取实时页窗口，避免两个服务各自维护一套时效规则。"""
@@ -362,21 +372,35 @@ def prompt_for(r: dict, conf: dict) -> str:
 返回严格 JSON：bucket, project_type, supplier_lead(true|false), fit_score(0-100), confidence(0-1), source_objects(数组：每项含 name,field,quote), product_inferences(数组：每项含 text,field,quote), reasons(数组：每项含 text,field,quote), evidence(数组，每项含 field 与 quote), risk_notes(数组：每项含 text,field,quote), exclude_reason(对象：含 text,field,quote；仅 bucket=exclude 时填写)。不得返回 matched_capabilities。
 公告：标题={r['title']}；采购方={r['buyer']}；地区={r['region']}；预算={r['budget']}；发布时间={r['published_at']}；截止={r['deadline_at']}；正文={r['content'][:content_limit]}"""
 
-def has_open_participation_evidence(record: dict, evidence: list[dict]) -> bool:
-    """允许不同站点/模型使用不同字段名，只按公告语义判断参与窗口。"""
-    if tender_has_passed_deadline(record):
-        return False
+def active_participation_evidence(record: dict, evidence: list[dict]) -> dict | None:
+    """Return the verified source claim that proves a current participation path."""
+    if not evidence or tender_has_passed_deadline(record):
+        return None
     title = str(record.get("title", "") or "")
     content = str(record.get("content", "") or "")
     # “结果”常见于政采网站导航和页脚，不能据此推翻一条标题明确为公开招标的公告。
     # 仅把公告标题或正文中的明确结果/履约语义作为关闭项目证据。
-    closed = r"(?:中标|成交|候选人).{0,12}(?:公告|公示|结果)|(?:中标|成交|结果)公告|验收|合同|可行性研究|勘察|设计咨询|规划"
+    closed = r"(?:中标|成交|候选人).{0,12}(?:公告|公示|结果)|(?:中标|成交|结果)公告|合同公告|验收公告|验收结果|可行性研究|勘察|设计咨询|规划"
     if re.search(closed, title, re.I):
-        return False
-    text = " ".join([title, str(record.get("deadline_at", "") or ""), content] + [str(x.get("quote", "") or "") for x in evidence])
-    if re.search(r"公开招标|竞争性谈判|竞争性磋商|询比|询价|采购公告|招标公告|报名|投标|递交|供应商.*参加|截止", text, re.I):
-        return True
-    return not bool(re.search(closed, content[:1200], re.I))
+        return None
+    now_cn = dt.datetime.now(dt.timezone(dt.timedelta(hours=8)))
+    dated: list[tuple[dt.datetime, dict]] = []
+    for item in evidence:
+        for point, _ in participation_datetimes(str(item.get("quote") or "")):
+            dated.append((point, item))
+    if dated:
+        point, item = max(dated, key=lambda value: value[0])
+        return item if point >= now_cn else None
+    if not tender_is_current(record):
+        return None
+    for item in evidence:
+        if re.search(r"公开招标|竞争性谈判|竞争性磋商|询比|询价|采购公告|招标公告|报名|投标|递交|供应商.*参加", str(item.get("quote") or ""), re.I):
+            return item
+    return None
+
+def has_open_participation_evidence(record: dict, evidence: list[dict]) -> bool:
+    """Compatibility boolean for callers that do not need the source claim."""
+    return active_participation_evidence(record, evidence) is not None
 
 def has_core_maritime_product(record: dict) -> bool:
     """用户确认的直接商机硬口径：海事场景中的 AIS/VDES/船岸站类产品。"""
@@ -462,7 +486,7 @@ source_objects：公告明确采购的设备、软件、服务或项目对象，
 participation：公开招标、询比、谈判、报名、投标、递交、获取文件、截止、开标等参与窗口事实。
 business_scope：公告明确的海事通信、导航、船舶信息、通航安全、港航监管、航标遥测、船岸通信或数据平台范围；没有则空数组。
 project_stage：招标采购、结果成交、合同验收、可研设计、澄清等阶段事实。
-exclusions：招聘、招租、废标终止、合同验收、环评、电力AIS、普通照明、LED 灯器等原文明确事实；没有则空数组。
+exclusions：招聘、招租、废标终止、合同公告/验收公告、环评、电力AIS、普通照明、LED 灯器等原文明确事实；“合同履行期限”“合同签订后交付”“交付并通过验收”等正常招采履约条款不得放入 exclusions；没有则空数组。
 risks：资格、联合体、保密、技术参数/采购清单缺失等需人工核实的原文事实；没有则空数组。
 为避免遗漏或截断：source_objects 最多2项、participation 最多2项、business_scope 最多2项、project_stage 最多1项、exclusions 最多1项、risks 最多2项；每类无必要事实时输出空数组，严禁重复同一引文。
 必须只输出 JSON：{{"source_objects":[],"participation":[],"business_scope":[],"project_stage":[],"exclusions":[],"risks":[]}}。
@@ -488,6 +512,15 @@ EXPLICIT_NON_CAPABILITY_PATTERN = re.compile(
     r"普通\s*led|led\s*(?:灯|灯器|照明)|普通\s*照明|一般\s*照明",
     re.I,
 )
+TITLE_HARD_EXCLUSION_RULES = (
+    ("recruitment", re.compile(r"招聘|招录|考录|拟聘用|拟录用|录用|面试|报到"), "公告标题明确为招聘或录用信息，不属于采购商机"),
+    ("rental", re.compile(r"招租|出租|租赁权|经营权(?:出租|出让)"), "公告标题明确为招租或经营权出让，不属于采购商机"),
+    ("cancelled", re.compile(r"废标|流标|终止公告|暂停公告|作废公告"), "公告标题明确为废标、流标或终止项目，已无有效参与入口"),
+    ("contract_notice", re.compile(r"合同公告|采购合同(?:公告|公示)|合同签订(?:公告|公示)"), "公告标题明确为合同阶段公告，已无有效参与入口"),
+    ("acceptance_notice", re.compile(r"验收公告|验收结果|项目验收(?:公告|公示|报告)"), "公告标题明确为验收阶段公告，已无有效参与入口"),
+    ("environmental_notice", re.compile(r"环境影响(?:评价)?报告(?:书)?(?:全本)?(?:及.*)?公示|环评(?:报告)?(?:书)?(?:全本)?(?:及.*)?公示"), "公告标题明确为环评或公众参与公示，不属于采购商机"),
+    ("power_ais", re.compile(r"空气绝缘|AIS\s*开关柜|开关柜|变电|输配电"), "公告标题明确为电力设备采购，其中 AIS 不代表船舶自动识别系统"),
+)
 LEGACY_EXCLUSION_REASON_PATTERN = re.compile(
     r"普通\s*led|led\s*(?:灯|灯器|照明)|普通\s*照明|"
     r"与遨海(?:科技)?(?:能力)?(?:不匹配|无关)|明确排除",
@@ -503,6 +536,9 @@ def deterministic_exclusion_fact(record: dict, facts: dict[str, list[dict]]) -> 
     """
     title = str(record.get("title") or "")
     content = str(record.get("content") or "")
+    for code, pattern, reason in TITLE_HARD_EXCLUSION_RULES:
+        if pattern.search(title):
+            return {"rule_code": code, "text": reason, "field": "公告标题", "quote": title[:80]}
     for field, value in (("公告标题", title), ("公告正文", content)):
         matched = EXPLICIT_NON_CAPABILITY_PATTERN.search(value)
         if not matched:
@@ -512,7 +548,7 @@ def deterministic_exclusion_fact(record: dict, facts: dict[str, list[dict]]) -> 
         else:
             begin = max(0, matched.start() - 24)
             quote = value[begin:matched.end() + 40].strip()[:80]
-        return {"text": "公告明确为普通照明或 LED 灯器采购，超出遨海可供货范围", "field": field, "quote": quote}
+        return {"rule_code": "ordinary_lighting", "text": "公告明确为普通照明或 LED 灯器采购，超出遨海可供货范围", "field": field, "quote": quote}
     return None
 
 
@@ -622,30 +658,30 @@ def decide_from_facts(r: dict, facts: dict[str, list[dict]]) -> dict:
     scope_specific = bool(re.search(
         r"(?<![a-z])ais(?![a-z])|(?<![a-z])vdes(?![a-z])|船站|船载终端|岸基站|通信基站|"
         r"船岸通信|船舶信息|通航安全|航标遥测|航标遥控|电子海图|综合导航|港航监管|"
-        r"调度监管|数据平台|智慧航道|智慧船闸|智慧港口|智慧海洋|航海保障|vts",
+        r"调度监管|数据平台|vts",
         verified_scope,
         re.I,
     ))
-    hard_excluded = bool(deterministic_exclusion or re.search(r"招聘|招录|录用|招租|废标|流标|终止|合同|验收|环评|空气绝缘|开关柜|变电|输配电|普通led|照明", lower))
+    hard_excluded = bool(deterministic_exclusion)
     has_scope = scope_specific
-    has_open = has_open_participation_evidence(r, facts["participation"])
+    participation = active_participation_evidence(r, facts["participation"])
+    has_open = participation is not None
     core_product = has_core_maritime_product(r)
-    integration = bool(re.search(r"智慧航道|智慧船闸|智慧港口|智慧海洋|航海保障|港航监管|vts|通航安全|船舶信息|航标遥测|船岸通信|调度监管|数据平台", verified_scope, re.I))
-    early_or_closed = bool(re.search(r"中标|成交|候选人|结果|合同|验收|可研|勘察|设计咨询|规划|澄清", lower))
+    integration = bool(re.search(r"智慧航道|智慧船闸|智慧港口|智慧海洋|航海保障|港航监管|vts", title + " " + verified_scope, re.I))
+    stage_text = title + " " + " ".join(str(x.get("text") or x.get("quote") or "") for x in facts["project_stage"])
+    early_or_closed = bool(re.search(r"中标|成交|候选人|结果|合同公告|验收公告|验收结果|可研|勘察|设计咨询|规划|澄清", stage_text))
 
     def claim(text: str, item: dict | None = None) -> dict:
         item = item or {"field": "公告标题", "quote": title[:80]}
         return {"text": text, "field": item.get("field", "公告正文"), "quote": item.get("quote", title[:80])}
 
     if hard_excluded:
-        basis = deterministic_exclusion or (facts["exclusions"] or facts["project_stage"] or [{"field": "公告标题", "quote": title[:80]}])[0]
         return {"bucket": "exclude", "project_type": "other", "supplier_lead": False,
                 "fit_score": 0, "confidence": 0.96, "source_objects": facts["source_objects"],
                 "product_inferences": [], "reasons": [], "risk_notes": facts["risks"],
-                "exclude_reason": claim("公告命中确定性排除条件", basis), "evidence": evidence}
+                "exclude_reason": deterministic_exclusion, "evidence": evidence}
     if has_open and (core_product or (integration and has_scope)):
         basis = (facts["source_objects"] or facts["business_scope"] or facts["participation"])[0]
-        participation = facts["participation"][0] if facts["participation"] else basis
         project_type = "direct_product" if core_product else "integration_project"
         return {"bucket": "direct_opportunity", "project_type": project_type, "supplier_lead": False,
                 "fit_score": 80 if core_product else 68, "confidence": 0.82,

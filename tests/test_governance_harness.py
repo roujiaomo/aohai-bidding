@@ -80,6 +80,32 @@ class GovernanceHarnessTests(unittest.TestCase):
                  "participation": [], "business_scope": [], "project_stage": [], "exclusions": [], "risks": []}
         self.assertEqual(decide_from_facts(record, facts)["bucket"], "exclude")
 
+    def test_contract_performance_and_delivery_acceptance_do_not_exclude_open_ais_tender(self):
+        record = {"title": "岸基AIS系统补点工程公开招标公告", "buyer": "航海保障中心", "content": "采购岸基AIS系统。合同履行期限为签订后十个月，完成安装调试并通过验收。投标截止2026年09月20日", "deadline_at": "2026-09-20"}
+        facts = {"source_objects": [{"name": "岸基AIS系统", "field": "采购需求", "quote": "采购岸基AIS系统"}],
+                 "participation": [fact("投标截止", "投标截止2026年09月20日")],
+                 "business_scope": [fact("岸基AIS系统", "采购岸基AIS系统")],
+                 "project_stage": [fact("公开招标", "公开招标公告")], "exclusions": [], "risks": []}
+        result = decide_from_facts(record, facts)
+        self.assertEqual(result["bucket"], "direct_opportunity")
+        self.assertFalse(result["exclude_reason"])
+
+    def test_true_contract_and_acceptance_notices_have_specific_reasons(self):
+        empty_facts = {"source_objects": [], "participation": [], "business_scope": [], "project_stage": [], "exclusions": [], "risks": []}
+        contract = decide_from_facts({"title": "AIS设备采购合同公告", "buyer": "海事局", "content": "", "deadline_at": ""}, empty_facts)
+        acceptance = decide_from_facts({"title": "AIS设备项目验收结果公告", "buyer": "海事局", "content": "", "deadline_at": ""}, empty_facts)
+        self.assertEqual(contract["exclude_reason"]["rule_code"], "contract_notice")
+        self.assertIn("合同阶段", contract["exclude_reason"]["text"])
+        self.assertEqual(acceptance["exclude_reason"]["rule_code"], "acceptance_notice")
+        self.assertNotIn("确定性排除条件", acceptance["exclude_reason"]["text"])
+
+    def test_generic_smart_waterway_name_is_market_intelligence_not_direct(self):
+        record = {"title": "六片区智慧航道项目询比公告", "buyer": "通信公司", "content": "现进行公开询比，具体内容详见技术需求书", "published_at": "2026-08-25", "deadline_at": ""}
+        facts = {"source_objects": [], "participation": [fact("公开询比", "现进行公开询比")],
+                 "business_scope": [fact("智慧航道项目", "六片区智慧航道项目")],
+                 "project_stage": [fact("询比公告", "询比公告")], "exclusions": [], "risks": []}
+        self.assertEqual(decide_from_facts(record, facts)["bucket"], "market_intelligence")
+
     def test_extraction_prompt_limits_fact_count_to_prevent_json_truncation(self):
         prompt = extraction_prompt_for({"title": "测试", "buyer": "", "region": "", "budget": "", "published_at": "", "deadline_at": "", "content": "正文"}, {"content_limit": 3000})
         self.assertIn("source_objects 最多2项", prompt)
