@@ -705,14 +705,20 @@ def facts_from_saved_review(r: dict) -> dict[str, list[dict]]:
     }
 
 
-def dual_run(limit: int, live: bool = False) -> dict:
+def dual_run(limit: int | None, live: bool = False) -> dict:
     """Compare a candidate decision without mutating any review conclusion.
 
     Default replay has no model cost. Live mode is deliberately CLI-only and
     stores the outcome in a separate immutable evaluation ledger.
     """
     conf = cfg(); c = conn(); run_id = f"{today()}-{'live' if live else 'replay'}-{now()[11:19].replace(':','')}"
-    selected = rows(c.execute("SELECT * FROM reviews WHERE ai_status IN ('approved','exclude','approved_manual','rejected_manual') ORDER BY id DESC LIMIT ?", (max(0, min(int(limit), 100)),)))
+    # A full-table evaluation is an explicit CLI operation.  It includes every
+    # persisted review state, including expired and manual-final records, but
+    # only writes the separate immutable evaluation ledger.
+    if limit is None:
+        selected = rows(c.execute("SELECT * FROM reviews ORDER BY id DESC"))
+    else:
+        selected = rows(c.execute("SELECT * FROM reviews ORDER BY id DESC LIMIT ?", (max(0, min(int(limit), 100)),)))
     processed = differed = failed = verified = total = 0; errors: list[str] = []
     for r in selected:
         try:
@@ -737,7 +743,7 @@ def dual_run(limit: int, live: bool = False) -> dict:
             failed += 1; errors.append(str(exc)[:200])
         c.commit()
     c.close()
-    return {"run_id": run_id, "mode": "live_extraction" if live else "saved_evidence_replay", "selected": len(selected), "processed": processed, "differed": differed, "failed": failed, "errors": errors, "evidence_total": total, "evidence_verified": verified,
+    return {"run_id": run_id, "mode": "live_extraction" if live else "saved_evidence_replay", "scope": "all_persisted_reviews" if limit is None else "latest_reviews", "selected": len(selected), "processed": processed, "differed": differed, "failed": failed, "errors": errors, "evidence_total": total, "evidence_verified": verified,
             "notice": "仅写入双跑评测账本，未修改任何 AI 评审结论或商机展示。"}
 
 def analyze(limit: int) -> dict:
@@ -1231,9 +1237,10 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e: self.send({"error":str(e)},500)
 
 def main():
-    ap=argparse.ArgumentParser(); ap.add_argument('--host',default='127.0.0.1'); ap.add_argument('--port',type=int,default=8791); ap.add_argument('--sync',action='store_true'); ap.add_argument('--analyze',type=int); ap.add_argument('--dual-run',type=int,help='只写入双跑评测账本，不修改既有结论'); ap.add_argument('--live',action='store_true',help='与 --dual-run 一起使用时调用 DeepSeek；默认仅回放已验证证据'); ap.add_argument('--audit-legacy-contradictions',action='store_true',help='只读检查旧版文字排除却通过的矛盾结论'); ap.add_argument('--repair-legacy-contradictions',action='store_true',help='修复已审计的旧版高确定性矛盾结论'); a=ap.parse_args()
+    ap=argparse.ArgumentParser(); ap.add_argument('--host',default='127.0.0.1'); ap.add_argument('--port',type=int,default=8791); ap.add_argument('--sync',action='store_true'); ap.add_argument('--analyze',type=int); ap.add_argument('--dual-run',type=int,help='只写入双跑评测账本，不修改既有结论；最多 100 条'); ap.add_argument('--dual-run-all',action='store_true',help='覆盖全部已保存评审记录；仅写入双跑评测账本'); ap.add_argument('--live',action='store_true',help='与 --dual-run/--dual-run-all 一起使用时调用 DeepSeek；默认仅回放已验证证据'); ap.add_argument('--audit-legacy-contradictions',action='store_true',help='只读检查旧版文字排除却通过的矛盾结论'); ap.add_argument('--repair-legacy-contradictions',action='store_true',help='修复已审计的旧版高确定性矛盾结论'); a=ap.parse_args()
     if a.sync: print(sync_candidates()); return
     if a.analyze is not None: print(json.dumps(analyze(a.analyze),ensure_ascii=False)); return
+    if a.dual_run_all: print(json.dumps(dual_run(None, live=a.live),ensure_ascii=False)); return
     if a.dual_run is not None: print(json.dumps(dual_run(a.dual_run, live=a.live),ensure_ascii=False)); return
     if a.audit_legacy_contradictions: print(json.dumps(audit_legacy_contradictions(),ensure_ascii=False)); return
     if a.repair_legacy_contradictions: print(json.dumps(repair_legacy_contradictions(),ensure_ascii=False)); return

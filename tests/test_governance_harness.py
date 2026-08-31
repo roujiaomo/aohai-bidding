@@ -84,3 +84,25 @@ class GovernanceHarnessTests(unittest.TestCase):
         prompt = extraction_prompt_for({"title": "测试", "buyer": "", "region": "", "budget": "", "published_at": "", "deadline_at": "", "content": "正文"}, {"content_limit": 3000})
         self.assertIn("source_objects 最多2项", prompt)
         self.assertIn("最长60字", prompt)
+
+    def test_full_dual_run_covers_every_persisted_review_without_changing_conclusions(self):
+        import tempfile
+        original_db = ai_review.DB
+        try:
+            with tempfile.TemporaryDirectory() as temp:
+                ai_review.DB = Path(temp) / "review.db"
+                c = ai_review.conn()
+                for idx, status in enumerate(("approved", "exclude", "expired", "approved_manual"), start=1):
+                    c.execute("""INSERT INTO reviews(source_tender_id,title,keyword_score,content,ai_status,bucket,synced_at)
+                        VALUES(?,?,?,?,?,?,?)""", (idx, f"公告{idx}", 10, "采购岸基AIS系统", status,
+                                                       "direct_opportunity" if status != "exclude" else "exclude", ai_review.now()))
+                c.commit(); c.close()
+                result = ai_review.dual_run(None, live=False)
+                self.assertEqual((result["scope"], result["selected"], result["processed"], result["failed"]),
+                                 ("all_persisted_reviews", 4, 4, 0))
+                c = ai_review.conn()
+                self.assertEqual(c.execute("SELECT COUNT(*) FROM review_evaluations WHERE run_id=?", (result["run_id"],)).fetchone()[0], 4)
+                self.assertEqual(c.execute("SELECT COUNT(*) FROM reviews WHERE ai_status='approved_manual'").fetchone()[0], 1)
+                c.close()
+        finally:
+            ai_review.DB = original_db
