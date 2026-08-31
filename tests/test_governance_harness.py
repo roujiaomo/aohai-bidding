@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 
 sys.path[:0] = ["services/ai-review", "app"]
-from ai_review import decide_from_facts, audit_legacy_contradictions, repair_legacy_contradictions
+from ai_review import decide_from_facts, audit_legacy_contradictions, repair_legacy_contradictions, extraction_prompt_for
 import ai_review
 from governance import can_transition, effective_rulebook, validate_extraction_shape
 from radar_quality_notify import collect_alerts
@@ -79,3 +79,8 @@ class GovernanceHarnessTests(unittest.TestCase):
         facts = {"source_objects": [{"name": "公务用车", "field": "公告正文", "quote": "集中采购公务用车和打印机"}],
                  "participation": [], "business_scope": [], "project_stage": [], "exclusions": [], "risks": []}
         self.assertEqual(decide_from_facts(record, facts)["bucket"], "exclude")
+
+    def test_extraction_prompt_limits_fact_count_to_prevent_json_truncation(self):
+        prompt = extraction_prompt_for({"title": "测试", "buyer": "", "region": "", "budget": "", "published_at": "", "deadline_at": "", "content": "正文"}, {"content_limit": 3000})
+        self.assertIn("source_objects 最多2项", prompt)
+        self.assertIn("最长60字", prompt)
