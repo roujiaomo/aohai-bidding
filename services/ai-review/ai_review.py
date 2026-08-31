@@ -609,11 +609,27 @@ def decide_from_facts(r: dict, facts: dict[str, list[dict]]) -> dict:
         str(x.get("name") or x.get("text") or "") for group in facts.values() for x in group
     )
     lower = (title + " " + all_facts + " " + str(r.get("content") or "")).lower()
+    # A procurement object alone (for example a car or printer purchased by a
+    # maritime bureau) is not business scope.  Scope must be a verified,
+    # concrete maritime/navigation product or service fact; this also prevents
+    # site navigation words from turning a generic government purchase into
+    # market intelligence.
+    verified_scope = " ".join(
+        " ".join(str(item.get(key) or "") for key in ("text", "name", "quote"))
+        for item in facts["business_scope"]
+    )
+    scope_specific = bool(re.search(
+        r"(?<![a-z])ais(?![a-z])|(?<![a-z])vdes(?![a-z])|船站|船载终端|岸基站|通信基站|"
+        r"船岸通信|船舶信息|通航安全|航标遥测|航标遥控|电子海图|综合导航|港航监管|"
+        r"调度监管|数据平台|智慧航道|智慧船闸|智慧港口|智慧海洋|航海保障|vts",
+        verified_scope,
+        re.I,
+    ))
     hard_excluded = bool(deterministic_exclusion or re.search(r"招聘|招录|录用|招租|废标|流标|终止|合同|验收|环评|空气绝缘|开关柜|变电|输配电|普通led|照明", lower))
-    has_scope = bool(facts["business_scope"] or facts["source_objects"])
+    has_scope = scope_specific
     has_open = has_open_participation_evidence(r, facts["participation"])
     core_product = has_core_maritime_product(r)
-    integration = bool(re.search(r"智慧航道|智慧船闸|智慧港口|智慧海洋|航海保障|港航监管|vts|通航安全|船舶信息|航标遥测|船岸通信|调度监管|数据平台", lower, re.I))
+    integration = bool(re.search(r"智慧航道|智慧船闸|智慧港口|智慧海洋|航海保障|港航监管|vts|通航安全|船舶信息|航标遥测|船岸通信|调度监管|数据平台", verified_scope, re.I))
     early_or_closed = bool(re.search(r"中标|成交|候选人|结果|合同|验收|可研|勘察|设计咨询|规划|澄清", lower))
 
     def claim(text: str, item: dict | None = None) -> dict:
@@ -793,7 +809,7 @@ def reanalyze_all_ai_reviews() -> dict:
 
 def reanalyze_approved_reviews() -> dict:
     """只重评未人工定案的 AI 通过项，并保留可审计的旧结论快照。"""
-    conf = cfg(); conf['profile_version'] = 'aohai-v5-evidence'; save_cfg(conf)
+    conf = cfg(); conf['profile_version'] = 'aohai-v6-two-stage'; save_cfg(conf)
     c = conn()
     targets = [r for r in rows(c.execute("SELECT * FROM reviews WHERE ai_status='approved' ORDER BY keyword_score DESC,id")) if not tender_has_passed_deadline(r)]
     if not targets:
@@ -802,8 +818,8 @@ def reanalyze_approved_reviews() -> dict:
     stamp = now()
     for r in targets:
         c.execute("""INSERT INTO review_history(review_id,previous_status,previous_label,previous_fit_score,previous_confidence,previous_reason_json,previous_evidence_json,archived_at,archive_reason)
-          VALUES(?,?,?,?,?,?,?,?,?)""", (r['id'],r['ai_status'],r['ai_label'],r['ai_fit_score'],r['ai_confidence'],r['ai_reason_json'],r['ai_evidence_json'],stamp,'原文证据纪律重审'))
-        c.execute("UPDATE reviews SET ai_status='pending',ai_label='待按原文依据重审',error='' WHERE id=?", (r['id'],))
+          VALUES(?,?,?,?,?,?,?,?,?)""", (r['id'],r['ai_status'],r['ai_label'],r['ai_fit_score'],r['ai_confidence'],r['ai_reason_json'],r['ai_evidence_json'],stamp,'按当前两阶段范围证据规则重审'))
+        c.execute("UPDATE reviews SET ai_status='pending',ai_label='待按当前范围规则重审',error='' WHERE id=?", (r['id'],))
     c.commit(); c.close()
     result = analyze(len(targets)); result['selected'] = len(targets)
     return result

@@ -73,3 +73,9 @@ class GovernanceHarnessTests(unittest.TestCase):
                 c.close()
         finally:
             ai_review.DB = original_db
+
+    def test_generic_purchase_object_is_not_maritime_scope(self):
+        record = {"title": "海事局政府集中采购情况", "buyer": "海事局", "content": "集中采购公务用车和打印机", "deadline_at": ""}
+        facts = {"source_objects": [{"name": "公务用车", "field": "公告正文", "quote": "集中采购公务用车和打印机"}],
+                 "participation": [], "business_scope": [], "project_stage": [], "exclusions": [], "risks": []}
+        self.assertEqual(decide_from_facts(record, facts)["bucket"], "exclude")

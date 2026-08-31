@@ -12,8 +12,8 @@ from copy import deepcopy
 from typing import Any
 
 
-RULEBOOK_VERSION = "2026.08.31-governance-v3"
-AI_HARNESS_VERSION = "two-stage-v2-consistency"
+RULEBOOK_VERSION = "2026.08.31-governance-v4"
+AI_HARNESS_VERSION = "two-stage-v3-scope"
 
 # These are the only display states a source tender may take in the formal
 # review workflow.  Transitions are enforced in the review service and logged
