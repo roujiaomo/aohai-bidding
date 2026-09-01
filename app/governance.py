@@ -13,7 +13,7 @@ from copy import deepcopy
 from typing import Any
 
 
-RULEBOOK_VERSION = "2026.08.31-governance-v9"
+RULEBOOK_VERSION = "2026.09.02-governance-v10-context-gate"
 AI_HARNESS_VERSION = "two-stage-v8-lightweight-guardrails"
 
 # One shared, structured policy is consumed by ingestion, AI review, tests and

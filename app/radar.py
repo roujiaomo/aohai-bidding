@@ -64,13 +64,23 @@ CONFIG_DEFAULTS = {
 
 RULES_DEFAULTS = {
     "business_categories": [
-        {"name": "AIS/VDES 与海事通信", "weight": 35, "keywords": ["ais", "vdes", "船舶自动识别", "岸基站", "船岸通信", "甚高频", "vhf", "航标遥测", "航标遥控", "海事卫星", "船载通信", "海上通信"]},
-        {"name": "通航安全与智慧航道", "weight": 28, "keywords": ["vts", "通航安全", "船舶交通管理", "智慧航道", "数字航道", "电子航道图", "航道整治", "航标管理", "海事监管", "航道维护", "航道疏浚", "航道工程", "航标工程", "航标维保"]},
-        {"name": "卫星互联网与航天软件", "weight": 20, "keywords": ["卫星互联网", "低轨卫星", "卫星通信", "卫星物联网", "星地融合", "卫星地面站", "卫星运营"]},
-        {"name": "北斗与时空服务", "weight": 16, "keywords": ["北斗", "船舶定位", "时空大数据", "遥感监测", "高精度定位"]},
-        {"name": "海洋资源与海岸工程", "weight": 18, "keywords": ["海洋观测", "海洋牧场", "海上风电", "海岸工程", "海洋测绘", "海底电缆", "海洋平台", "海洋装备", "海洋环境", "海洋调查", "海域使用", "海岛保护", "海洋生态", "海洋监测", "海洋数据", "智慧海洋", "蓝色经济"]},
-        {"name": "相关延展场景", "weight": 10, "keywords": ["智慧港口", "港航一体化", "水上应急", "搜救", "河湖监管", "水运工程", "港口工程", "码头工程", "船舶管理", "航运管理"]},
+        {"name": "AIS/VDES 与海事通信", "weight": 35, "context": "maritime_inland", "keywords": ["ais", "vdes", "船舶自动识别", "岸基站", "船岸通信", "甚高频", "vhf", "航标遥测", "航标遥控", "海事卫星", "船载通信", "海上通信"]},
+        {"name": "通航安全与智慧航道", "weight": 28, "context": "maritime_inland", "keywords": ["vts", "通航安全", "船舶交通管理", "智慧航道", "数字航道", "电子航道图", "航道整治", "航标管理", "海事监管", "航道维护", "航道疏浚", "航道工程", "航标工程", "航标维保"]},
+        {"name": "卫星互联网与航天软件", "weight": 20, "context": "aerospace", "keywords": ["卫星互联网", "低轨卫星", "卫星通信", "卫星物联网", "星地融合", "卫星地面站", "卫星运营"]},
+        {"name": "北斗与时空服务", "weight": 16, "context": "maritime_inland", "keywords": ["北斗", "船舶定位", "时空大数据", "遥感监测", "高精度定位"]},
+        {"name": "海洋资源与海岸工程", "weight": 18, "context": "maritime_inland", "keywords": ["海洋观测", "海洋牧场", "海上风电", "海岸工程", "海洋测绘", "海底电缆", "海洋平台", "海洋装备", "海洋环境", "海洋调查", "海域使用", "海岛保护", "海洋生态", "海洋监测", "海洋数据", "智慧海洋", "蓝色经济"]},
+        {"name": "相关延展场景", "weight": 10, "context": "maritime_inland", "keywords": ["智慧港口", "港航一体化", "水上应急", "搜救", "河湖监管", "水运工程", "港口工程", "码头工程", "船舶管理", "航运管理"]},
     ],
+    "context_terms": {
+        "maritime_inland": ["船舶", "渔船", "航道", "航标", "海事", "港口", "港务", "港航", "通航", "船岸", "水上", "航运", "航行", "运河", "船闸", "航海", "海区", "海上", "水运", "河湖", "码头", "海洋", "海岸", "海底", "渔业", "vts"],
+        "aerospace": ["航天", "低轨", "星座", "轨道", "载荷", "星地", "空间段", "卫星平台", "卫星互联网", "卫星物联网", "卫星地面站", "卫星运营", "测控站", "遥感卫星", "通信卫星"],
+    },
+    "context_patterns": {
+        "aerospace": [
+            r"卫星.{0,8}(?:系统|终端|天线|基站|节点|载荷|链路|测控|接收机|发射机|便携站|维保|维护)",
+            r"(?:系统|终端|天线|基站|节点|载荷|链路|测控|接收机|发射机|便携站|维保|维护).{0,8}卫星",
+        ],
+    },
     # 天眼查检索词（界面：数据规则 → 天眼查检索词配置）。每个词每次抓取消耗 1 次额度；
     # 默认 12 词 × 每天 6 次抓取 ≈ 72 次/天，低于账号日限额 100。可用 TYC_KEYWORDS 环境变量覆盖。
     "tyc_search_keywords": [
@@ -109,6 +119,9 @@ def load_config(path: Path = DEFAULT_CONFIG) -> dict:
                         cfg["rules"][k] = _deep_copy(v)
         except Exception:
             pass
+    for category in cfg.get("rules", {}).get("business_categories", []):
+        if isinstance(category, dict) and category.get("context") not in {"maritime_inland", "aerospace"}:
+            category["context"] = "aerospace" if "卫星" in str(category.get("name") or "") else "maritime_inland"
     return cfg
 
 def _deep_copy(obj):
@@ -406,7 +419,7 @@ MARITIME_CONTEXT_TERMS = (
     "航海", "海区", "海上", "水运", "渔业", "海洋",
 )
 MARITIME_STRONG_PATTERNS = (
-    r"船舶自动识别", r"ais\s*(?:岸基|基站|航标)", r"(?:船载|航标)\s*ais",
+    r"船舶自动识别", r"ais\s*(?:岸基|基站|航标)", r"(?:岸基|船载|航标)\s*ais",
     r"[\u4e00-\u9fff]{1,8}船\s*ais", r"vd(?:e)?s\s*(?:岸基|基站|船载|通信|系统)",
 )
 ELECTRICAL_AIS_TERMS = (
@@ -450,6 +463,56 @@ def ais_vdes_context(item: dict) -> dict:
             "reason": "海事上下文不足"}
 
 
+def business_keyword_context(item: dict, category: dict, rules: dict) -> dict:
+    """Require a category-specific context before a keyword can score.
+
+    Satellite keywords need a verified aerospace phrase or a maritime/inland
+    deployment scene.  Every other category needs a maritime/inland scene.
+    Generic words such as 搜救、北斗、卫星通信 therefore cannot score alone,
+    while self-describing phrases such as 航道、海洋、卫星互联网 still carry
+    their own context through the centrally configured context term sets.
+    """
+    corpus = text_of(item)
+    configured = rules.get("context_terms") or RULES_DEFAULTS["context_terms"]
+    maritime_hits = [str(term) for term in configured.get("maritime_inland", [])
+                     if str(term).lower() in corpus]
+    aerospace_hits = [str(term) for term in configured.get("aerospace", [])
+                      if str(term).lower() in corpus]
+    patterns = rules.get("context_patterns") or RULES_DEFAULTS["context_patterns"]
+    aerospace_hits.extend(
+        match.group(0) for pattern in patterns.get("aerospace", [])
+        for match in re.finditer(str(pattern), corpus, re.I)
+    )
+    aerospace_hits = list(dict.fromkeys(aerospace_hits))
+    mode = category.get("context")
+    if mode not in {"maritime_inland", "aerospace"}:
+        mode = "aerospace" if "卫星" in str(category.get("name") or "") else "maritime_inland"
+    if mode == "aerospace":
+        confirmed = bool(aerospace_hits or maritime_hits)
+        hits = aerospace_hits or maritime_hits
+        label = "航天语境" if aerospace_hits else "海事卫星应用语境"
+    else:
+        confirmed = bool(maritime_hits)
+        hits = maritime_hits
+        label = "海洋/内河语境"
+    return {"confirmed": confirmed, "mode": mode, "hits": hits,
+            "reason": f"{label}：{'、'.join(hits)}" if hits else f"缺少{label}"}
+
+
+def rejected_business_keyword_contexts(item: dict, rules: dict | None = None) -> list[dict]:
+    """Explain keyword hits suppressed solely because their context is absent."""
+    rules = rules or _deep_copy(RULES_DEFAULTS)
+    text = text_of(item)
+    rejected = []
+    for category in rules.get("business_categories", []):
+        hits = sorted({str(word) for word in category.get("keywords", []) if str(word).lower() in text})
+        context = business_keyword_context(item, category, rules)
+        if hits and not context["confirmed"]:
+            rejected.append({"category": str(category.get("name") or ""), "hits": hits,
+                             "context": context["mode"], "reason": context["reason"]})
+    return rejected
+
+
 def score_item(item: dict, rules: dict | None = None) -> tuple[int, list[dict]]:
     """根据业务规则对公告评分。rules 来自 config.json 的 rules 字段。"""
     if rules is None:
@@ -464,13 +527,19 @@ def score_item(item: dict, rules: dict | None = None) -> tuple[int, list[dict]]:
         if name == "AIS/VDES 与海事通信":
             keywords = [word for word in keywords if word.lower() not in {"ais", "vdes"}]
         hits = [word for word in keywords if word.lower() in text]
+        keyword_context = business_keyword_context(item, cat, rules)
+        if hits and not keyword_context["confirmed"]:
+            hits = []
         if name == "AIS/VDES 与海事通信" and protocol_context["confirmed"]:
             hits.extend(protocol_context["hits"])
         if hits:
+            hits = sorted(set(hits))
             has_business_hit = True
             points = min(weight, 8 + len(hits) * 7)
             score += points
-            matches.append({"type": "business", "label": name, "points": points, "hits": hits})
+            context_reason = keyword_context["reason"] if keyword_context["confirmed"] else protocol_context["reason"]
+            matches.append({"type": "business", "label": name, "points": points, "hits": hits,
+                            "context": keyword_context["mode"], "reason": context_reason})
     # 无业务关键词命中 → 直接返回 0 分，不因地区/采购方/预算给分
     if not has_business_hit:
         return 0, []
@@ -3489,12 +3558,12 @@ function renderHelpRules(){
       <p>其他已接入来源以“公告栏目”为入口，不会只靠关键词搜索，以免漏掉标题没有关键词、但正文中有明确产品需求的项目。它们包括海事局、航道局、交通运输部门、港口平台、全国公共资源交易平台等；获取到的每一条仍会经过入库筛选。</p>
       <p>中国政府采购网关键词检索单独低频运行，以避免频控；天眼查也单独按额度运行，不混入常规全站抓取。</p>
     </div></div>`;
-  const cats=(rules.business_categories||[]).map(cat=>`<div class="help-step"><span class="help-step-no">✓</span><div><b>${esc(cat.name)}</b>（最多 ${Number(cat.weight)||0} 分）<div class="tag-flow">${helpTags(cat.keywords)}</div></div></div>`).join('');
+  const cats=(rules.business_categories||[]).map(cat=>`<div class="help-step"><span class="help-step-no">✓</span><div><b>${esc(cat.name)}</b>（最多 ${Number(cat.weight)||0} 分；${cat.context==='aerospace'?'须有航天或海事卫星语境':'须有海洋、内河、船舶、航道或港航语境'}）<div class="tag-flow">${helpTags(cat.keywords)}</div></div></div>`).join('');
   ingest.innerHTML=`
     <div class="card help-card"><div class="card-body">
       <h3>一条公告怎样进入商机库</h3>
       <div class="help-step"><span class="help-step-no">1</span><div><b>先检查是不是可用公告。</b>没有标题、招聘/录用、废标/流标、终止/暂停/作废、合同或验收、环评公示会被排除。<b>中标、成交和候选人结果不会因“结果”身份被排除</b>：若业务相关，会保留为供应商、采购方和竞争格局情报。</div></div>
-      <div class="help-step"><span class="help-step-no">2</span><div><b>检查业务相关性。</b>标题、采购单位、地区和公告正文会与下方业务词比对；至少命中一个业务分类才有分数、才可能入库。每个分类命中越多得分越高，单类最高不超过该分类的上限。</div></div>
+      <div class="help-step"><span class="help-step-no">2</span><div><b>检查业务相关性和语境。</b>卫星类词必须同时具备航天背景或海事卫星应用语境；其他业务词必须具备海洋、内河、船舶、航道或港航语境。“搜救、北斗、卫星通信”等宽泛词单独出现不加分。至少一个业务分类同时满足“关键词 + 对应语境”才可能入库。</div></div>
       <div class="help-step"><span class="help-step-no">3</span><div><b>过滤政策新闻和网页噪声。</b>纯通知、政策解读、工作总结等不会仅因正文偶然出现业务词而进入；系统还会清理页面导航、页脚文字，并检查链接可访问性。</div></div>
       <div class="help-step"><span class="help-step-no">4</span><div><b>合并重复公告。</b>同一链接、同一标题或高度相似的跨站转载会合并为一条，保留更完整的正文和官方来源链接。</div></div>
     </div></div>
@@ -4563,11 +4632,24 @@ def validate_rules(rules: dict) -> list[str]:
             weight = cat.get("weight", 10)
             if not isinstance(weight, (int, float)) or weight < 1 or weight > 100:
                 errors.append(f"分类「{name}」权重必须在 1-100 之间")
+            if cat.get("context") not in {"maritime_inland", "aerospace"}:
+                errors.append(f"分类「{name}」语境必须是 maritime_inland 或 aerospace")
             keywords = cat.get("keywords", [])
             if not isinstance(keywords, list):
                 errors.append(f"分类「{name}」关键词必须是数组")
             elif len(keywords) == 0:
                 errors.append(f"分类「{name}」至少需要 1 个关键词")
+    contexts = rules.get("context_terms", {})
+    if not isinstance(contexts, dict):
+        errors.append("context_terms 必须是对象")
+    else:
+        for context_name in ("maritime_inland", "aerospace"):
+            terms = contexts.get(context_name)
+            if not isinstance(terms, list) or not terms:
+                errors.append(f"context_terms.{context_name} 必须是非空数组")
+    context_patterns = rules.get("context_patterns", {})
+    if not isinstance(context_patterns, dict) or not isinstance(context_patterns.get("aerospace"), list):
+        errors.append("context_patterns.aerospace 必须是数组")
     # 验证重点区域
     pr = rules.get("priority_regions", {})
     if not isinstance(pr, dict):
