@@ -2,6 +2,7 @@ import json
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path[:0] = ["services/ai-review", "app"]
 from ai_review import (decide_from_facts, audit_legacy_contradictions,
@@ -246,7 +247,13 @@ class GovernanceHarnessTests(unittest.TestCase):
     def test_semantic_participation_fact_accepts_a_verified_date_only_quote(self):
         record = {"title": "集成型插卡式AIS竞争性谈判公告", "published_at": "2026-08-31", "deadline_at": "2026-09-11"}
         item = {"text": "响应截止", "field": "响应截止时间", "quote": "2026年09月11日 09点00分"}
-        self.assertEqual(active_participation_evidence(record, [item]), item)
+        deadline = ai_review.dt.datetime(2026, 9, 11, 9, tzinfo=ai_review.dt.timezone(ai_review.dt.timedelta(hours=8)))
+        # Freeze only the clock; parsing still uses the real datetime class.
+        with patch.object(ai_review.dt, "datetime", wraps=ai_review.dt.datetime) as clock:
+            for seconds, expected in ((-1, item), (0, item), (1, None)):
+                with self.subTest(seconds_from_deadline=seconds):
+                    clock.now.return_value = deadline + ai_review.dt.timedelta(seconds=seconds)
+                    self.assertEqual(active_participation_evidence(record, [item]), expected)
 
     def test_closed_stage_fact_overrides_old_participation_sentence(self):
         record = {"title": "岸基AIS系统采购成交结果公告", "buyer": "海事局", "content": "原招标文件写投标截止2026年09月20日，现发布成交结果", "published_at": "2026-08-31", "deadline_at": "2026-09-20"}

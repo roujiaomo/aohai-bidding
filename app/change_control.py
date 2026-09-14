@@ -7,6 +7,8 @@ utility file.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 from pathlib import Path
 
 
@@ -26,6 +28,8 @@ PATH_DOMAINS = {
     "app/radar_quality_notify.py": {"governance", "presentation"},
     "services/ai-review/ai_review.py": {"ai", "classification", "presentation", "governance"},
     "app/governance.py": {"classification", "ai", "governance"},
+    "app/change_control.py": {"governance"},
+    "scripts/change_impact_check.py": {"governance"},
 }
 
 KEYWORDS = {
@@ -47,7 +51,7 @@ def classify(paths: list[str], content: str = "") -> set[str]:
     normalized = [Path(p).as_posix().lstrip("./") for p in paths]
     for path in normalized:
         for prefix, domains in PATH_DOMAINS.items():
-            if path == prefix or path.startswith(prefix.rsplit("/", 1)[0] + "/") and prefix.endswith("radar.py"):
+            if path == prefix:
                 affected.update(domains)
     lower = content.lower()
     for domain, words in KEYWORDS.items():
@@ -58,3 +62,25 @@ def classify(paths: list[str], content: str = "") -> set[str]:
 
 def summary(domains: set[str]) -> list[str]:
     return [DOMAINS[name] for name in sorted(domains)]
+
+
+def diff_digest(files: list[str], patch: str) -> str:
+    """Bind a review to exactly one diff, including its file inventory."""
+    payload = json.dumps({"files": sorted(files), "patch": patch}, ensure_ascii=False, sort_keys=True)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def validate_no_rule_change(review: object, files: list[str], patch: str) -> str:
+    """Validate an auditable developer assessment, not proof of equivalence."""
+    if not isinstance(review, dict):
+        return "复核报告必须是 JSON 对象"
+    if review.get("decision") != "no_rule_change":
+        return "复核结论必须为 no_rule_change"
+    if review.get("diff_sha256") != diff_digest(files, patch):
+        return "复核报告已过期或不属于当前差异"
+    if review.get("files") != sorted(files):
+        return "复核文件清单必须与当前差异完全一致且已排序"
+    for field in ("reviewer", "reason", "validation"):
+        if not isinstance(review.get(field), str) or not review[field].strip():
+            return f"复核报告缺少 {field}"
+    return ""
