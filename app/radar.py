@@ -223,6 +223,8 @@ CREATE TABLE IF NOT EXISTS tenders (
   category TEXT DEFAULT '', agency TEXT DEFAULT '', winner TEXT DEFAULT '',
   evidence_status TEXT DEFAULT '',
   link_ok INTEGER DEFAULT 1,
+  archive_url TEXT DEFAULT '',
+  source_link_status TEXT DEFAULT 'unchecked',
   created_at TEXT NOT NULL, updated_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_tenders_score ON tenders(score DESC);
@@ -279,6 +281,14 @@ COMMIT;
         pass
     try:
         conn.execute("ALTER TABLE tenders ADD COLUMN link_ok INTEGER DEFAULT 1")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute("ALTER TABLE tenders ADD COLUMN archive_url TEXT DEFAULT ''")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute("ALTER TABLE tenders ADD COLUMN source_link_status TEXT DEFAULT 'unchecked'")
     except sqlite3.OperationalError:
         pass
     try:
@@ -991,7 +1001,7 @@ def upsert_tender(conn: sqlite3.Connection, item: dict, link_ok: int = 1, rules:
             merged_sources = merged_sources + "," + item["source_code"]
         new_score = max(existing_score := conn.execute("SELECT score FROM tenders WHERE id=?", (existing["id"],)).fetchone()[0], score)
         # 优先保留非空的 deadline_at 和 buyer；人工字段（优先级等）不动。
-        cur = conn.execute("SELECT title, content, deadline_at, buyer, region, category, agency, winner, source_url FROM tenders WHERE id=?", (existing["id"],)).fetchone()
+        cur = conn.execute("SELECT title, content, deadline_at, buyer, region, category, agency, winner, source_url, archive_url, source_link_status FROM tenders WHERE id=?", (existing["id"],)).fetchone()
         # 官方平台优先于商业聚合源（天眼查）：官方与聚合源合并时，标题/链接无条件取官方，正文取官方（官方无正文时保留聚合源摘要）；同类来源才比长度。
         exist_official = not _is_commercial_only(existing["source_code"])
         new_official = item["source_code"] not in COMMERCIAL_CODES
@@ -1011,23 +1021,25 @@ def upsert_tender(conn: sqlite3.Connection, item: dict, link_ok: int = 1, rules:
         new_category = cur["category"] or item.get("category", "")
         new_agency = cur["agency"] or item.get("agency", "")
         new_winner = cur["winner"] or item.get("winner", "")
-        conn.execute("""UPDATE tenders SET title=?, content=?, source_code=?, source_url=?, buyer=?, region=?,
+        new_archive_url = item.get("archive_url") or cur["archive_url"] or ""
+        new_link_status = item.get("source_link_status") or cur["source_link_status"] or "unchecked"
+        conn.execute("""UPDATE tenders SET title=?, content=?, source_code=?, source_url=?, archive_url=?, source_link_status=?, buyer=?, region=?,
             deadline_at=COALESCE(NULLIF(deadline_at,''),?), budget=COALESCE(budget,?),
             category=?, agency=?, winner=?,
             score=?, match_json=?, link_ok=?, updated_at=? WHERE id=?""",
-            (new_title, new_content, merged_sources, new_url, new_buyer, new_region,
+            (new_title, new_content, merged_sources, new_url, new_archive_url, new_link_status, new_buyer, new_region,
              new_deadline, item.get("budget"), new_category, new_agency, new_winner,
              new_score, json.dumps(_strip_surrogates(matches), ensure_ascii=False), link_ok, stamp, existing["id"]))
         conn.commit()
         return False, new_score
     # ---- 指纹去重（同一来源同一URL）----
     initial_priority = rating_label(score, (rules or {}).get("opportunity_levels"))
-    values = (fp, item["source_code"], item["source_url"], item["title"], item.get("buyer", ""), item.get("region", ""),
+    values = (fp, item["source_code"], item["source_url"], item.get("archive_url", ""), item.get("source_link_status", "unchecked"), item["title"], item.get("buyer", ""), item.get("region", ""),
               item.get("budget"), item.get("published_at", ""), item.get("deadline_at", ""), item.get("content", ""),
               score, json.dumps(_strip_surrogates(matches), ensure_ascii=False), link_ok, initial_priority, stamp, stamp,
               item.get("category", ""), item.get("agency", ""), item.get("winner", ""))
-    cur = conn.execute("""INSERT INTO tenders(fingerprint,source_code,source_url,title,buyer,region,budget,published_at,deadline_at,content,score,match_json,link_ok,priority,created_at,updated_at,category,agency,winner)
-      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(fingerprint) DO UPDATE SET source_url=excluded.source_url, content=excluded.content,
+    cur = conn.execute("""INSERT INTO tenders(fingerprint,source_code,source_url,archive_url,source_link_status,title,buyer,region,budget,published_at,deadline_at,content,score,match_json,link_ok,priority,created_at,updated_at,category,agency,winner)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(fingerprint) DO UPDATE SET source_url=excluded.source_url, archive_url=COALESCE(NULLIF(excluded.archive_url,''),tenders.archive_url), source_link_status=excluded.source_link_status, content=excluded.content,
       score=excluded.score,match_json=excluded.match_json,link_ok=excluded.link_ok,updated_at=excluded.updated_at,
       category=COALESCE(NULLIF(tenders.category,''),excluded.category),
       agency=COALESCE(NULLIF(tenders.agency,''),excluded.agency),
@@ -1096,6 +1108,29 @@ def _http_link_reachable(url: str, timeout: int = 8) -> bool:
         return exc.code < 400
     except Exception:
         return False
+
+def _tianyancha_official_link_status(url: str, title: str, timeout: int = 12) -> str:
+    """Return available/unavailable/unchecked for a Tianyancha-provided official link.
+
+    A 200 response is not evidence of a usable announcement: some source sites
+    redirect expired detail URLs to their homepage.  Only mark unavailable when
+    the redirect is conclusive; transient network errors stay unchecked.
+    """
+    try:
+        req = Request(url, headers={**_HTTP_HEADERS, "Range": "bytes=0-65535"}, method="GET")
+        with urlopen(req, timeout=timeout) as resp:
+            final = urlparse(resp.geturl())
+            initial = urlparse(url)
+            html = resp.read(65536).decode("utf-8", errors="replace")
+        if final.netloc == initial.netloc and final.path.rstrip("/") == "":
+            return "unavailable"
+        normalized_title = re.sub(r"\s+", "", title)
+        normalized_html = re.sub(r"\s+", "", html)
+        if normalized_title and normalized_title[:12] in normalized_html:
+            return "available"
+        return "unchecked"
+    except (HTTPError, URLError, TimeoutError, OSError):
+        return "unchecked"
 
 def _http_post(url: str, data: dict, timeout: int = 20) -> str:
     """POST 表单数据到 URL，返回响应文本。"""
@@ -1507,6 +1542,7 @@ def fetch_tianyancha() -> list[dict]:
             print(f"  [{profile_name}/{kw}] 第 {page} 页返回 {len(page_items)} 条")
             for it in page_items:
                 link = it.get("link") or it.get("bidUrl") or ""
+                archive_url = str(it.get("bidUrl") or "").strip()
                 title = str(it.get("title", "")).strip()
                 if not link or not title or link in seen_urls:
                     continue
@@ -1518,6 +1554,7 @@ def fetch_tianyancha() -> list[dict]:
                     content = _gd_yst_content(link) or content
                 items.append({
                     "source_url": link,
+                    "archive_url": archive_url,
                     "title": title,
                     "published_at": it.get("publishTime", ""),
                     "buyer": it.get("purchaser", ""),
@@ -2483,7 +2520,14 @@ def fetch_source(conn: sqlite3.Connection, source_code: str) -> tuple[int, int]:
         item["source_code"] = source_code
         try:
             link_ok = 1
-            # 天眼查返回的是手机站深链（带签名参数与防爬校验），HEAD 验证必然失败，跳过验证直接入库；
+            item["source_link_status"] = "available"
+            # 天眼查同时保存官网原文和自身公告存档。官网深链可能返回 200 却被重定向到首页，
+            # 因此只在能明确识别首页重定向时标为不可用；网络/动态页面无法确认时不误判。
+            if source_code == "tianyancha":
+                status = _tianyancha_official_link_status(item["source_url"], item["title"], vtimeout)
+                item["source_link_status"] = status
+                link_ok = 0 if status == "unavailable" else 1
+            # 天眼查返回的是手机站深链（带签名参数与防爬校验），HEAD 验证必然失败，跳过通用 HEAD 校验；
             # hn_ggzy 是 hash 路由页面；多个政务站点拒绝 HEAD 方法（403），同样跳过。
             if verify and source_code not in ("tianyancha", "hn_ggzy", "hb_msa", "ln_msa", "hn_msa", "sd_port"):
                 if not _http_link_reachable(item["source_url"], timeout=vtimeout):
@@ -3473,6 +3517,9 @@ function cardBottom(x,actions){
   let srcHtml=actions?parts.pop():'';
   return `<div class="tcard-bottom">${parts.join('')}${actions?actions.replace('</span>',srcHtml+'</span>'):srcHtml}</div>`;
 }
+function isTycRecord(x){return String(x.source_code||'').split(',').map(s=>s.trim()).includes('tianyancha');}
+function tenderHref(x){return isTycRecord(x)&&x.source_link_status==='unavailable'&&x.archive_url?x.archive_url:x.source_url;}
+function tenderLinkTitle(x){return isTycRecord(x)&&x.source_link_status==='unavailable'&&x.archive_url?'官网原文不可用，打开天眼查公告存档':displayTitle(x.title);}
 /* 卡片外壳：顶部元信息行（优先级·分类·采购单位·地区·日期）→ 标题 → 底部信息 */
 function cardHtml(x,actions){
   tenderDetailMap[String(x.id)]=x;
@@ -3484,7 +3531,7 @@ function cardHtml(x,actions){
       <span class="tcard-buyer">${esc(x.buyer||'—')}${x.region?' · '+esc(x.region):''}</span>
       <span class="tcard-date">${esc(x.published_at)||'—'}</span>
     </div>
-    <div class="tcard-title"><a title="${esc(displayTitle(x.title))}" href="${esc(x.source_url)}" target="_blank" rel="noopener">${esc(displayTitle(x.title))}</a></div>
+    <div class="tcard-title"><a title="${esc(tenderLinkTitle(x))}" href="${esc(tenderHref(x))}" target="_blank" rel="noopener">${esc(displayTitle(x.title))}</a></div>
     ${cardBottom(x,actions)}
   </div>`;
 }
@@ -4172,7 +4219,7 @@ async function loadDeleted(pg){
       return `<tr>
         <td><span class="rating ${rc}">${esc(x.rating)}</span></td>
         <td>
-          <div class="tender-title"><a href="${esc(x.source_url)}" target="_blank" rel="noopener">${esc(x.title)}</a></div>
+          <div class="tender-title"><a title="${esc(tenderLinkTitle(x))}" href="${esc(tenderHref(x))}" target="_blank" rel="noopener">${esc(x.title)}</a></div>
           <div class="tender-meta">${esc(srcLabel(x.source_code))} &middot; ${esc(x.published_at)}</div>
         </td>
         <td>

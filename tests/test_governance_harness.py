@@ -114,7 +114,7 @@ class GovernanceHarnessTests(unittest.TestCase):
             if sample.get("facts"):
                 facts = sample["facts"]
             elif "岸基AIS" in content:
-                facts = {"source_objects":[{"name":"岸基AIS系统","field":"公告正文","quote":"采购岸基AIS系统"}],"participation":[fact("投标截止", "投标截止2026年09月20日")],"business_scope":[fact("岸基AIS系统", "采购岸基AIS系统")],"project_stage":[fact("公开招标", "公开招标")],"exclusions":[],"risks":[]}
+                facts = {"source_objects":[{"name":"岸基AIS系统","field":"公告正文","quote":"采购岸基AIS系统"}],"participation":[fact("投标截止", "投标截止2026年10月20日")],"business_scope":[fact("岸基AIS系统", "采购岸基AIS系统")],"project_stage":[fact("公开招标", "公开招标")],"exclusions":[],"risks":[]}
             elif "LED" in title:
                 facts = {"source_objects":[{"name":"LED灯器","field":"公告正文","quote":"LED灯器采购项目"}],"participation":[],"business_scope":[],"project_stage":[fact("中标结果", "中标结果公告")],"exclusions":[fact("普通 LED 灯器", "LED灯器采购项目")],"risks":[]}
             elif "开关" in title:
@@ -163,9 +163,9 @@ class GovernanceHarnessTests(unittest.TestCase):
         self.assertEqual(decide_from_facts(record, facts)["bucket"], "exclude")
 
     def test_contract_performance_and_delivery_acceptance_do_not_exclude_open_ais_tender(self):
-        record = {"title": "岸基AIS系统补点工程公开招标公告", "buyer": "航海保障中心", "content": "采购岸基AIS系统。合同履行期限为签订后十个月，完成安装调试并通过验收。投标截止2026年09月20日", "deadline_at": "2026-09-20"}
+        record = {"title": "岸基AIS系统补点工程公开招标公告", "buyer": "航海保障中心", "content": "采购岸基AIS系统。合同履行期限为签订后十个月，完成安装调试并通过验收。投标截止2026年10月20日", "deadline_at": "2026-10-20"}
         facts = {"source_objects": [{"name": "岸基AIS系统", "field": "采购需求", "quote": "采购岸基AIS系统"}],
-                 "participation": [fact("投标截止", "投标截止2026年09月20日")],
+                 "participation": [fact("投标截止", "投标截止2026年10月20日")],
                  "business_scope": [fact("岸基AIS系统", "采购岸基AIS系统")],
                  "project_stage": [fact("公开招标", "公开招标公告")], "exclusions": [], "risks": []}
         result = decide_from_facts(record, facts)
@@ -189,16 +189,16 @@ class GovernanceHarnessTests(unittest.TestCase):
         self.assertEqual(decide_from_facts(record, facts)["bucket"], "market_intelligence")
 
     def test_raw_body_keywords_cannot_create_a_core_product(self):
-        record = {"title": "办公设备采购公告", "buyer": "海事局", "content": "采购打印机。网页背景资料介绍AIS船舶监管系统。投标截止2026年09月20日", "published_at": "2026-08-31", "deadline_at": "2026-09-20"}
+        record = {"title": "办公设备采购公告", "buyer": "海事局", "content": "采购打印机。网页背景资料介绍AIS船舶监管系统。投标截止2026年10月20日", "published_at": "2026-09-21", "deadline_at": "2026-10-20"}
         facts = {"source_objects": [{"name": "打印机", "field": "采购需求", "quote": "采购打印机"}],
-                 "participation": [fact("投标截止", "投标截止2026年09月20日")],
+                 "participation": [fact("投标截止", "投标截止2026年10月20日")],
                  "business_scope": [], "project_stage": [fact("采购公告", "采购公告")], "exclusions": [], "risks": []}
         self.assertEqual(decide_from_facts(record, facts)["bucket"], "exclude")
 
     def test_raw_body_led_reference_cannot_exclude_verified_ais_object(self):
-        record = {"title": "岸基AIS系统采购公告", "buyer": "航标处", "content": "采购岸基AIS系统。安装应避开LED灯具线路。投标截止2026年09月20日", "published_at": "2026-08-31", "deadline_at": "2026-09-20"}
+        record = {"title": "岸基AIS系统采购公告", "buyer": "航标处", "content": "采购岸基AIS系统。安装应避开LED灯具线路。投标截止2026年10月20日", "published_at": "2026-09-21", "deadline_at": "2026-10-20"}
         facts = {"source_objects": [{"name": "岸基AIS系统", "field": "采购需求", "quote": "采购岸基AIS系统"}],
-                 "participation": [fact("投标截止", "投标截止2026年09月20日")],
+                 "participation": [fact("投标截止", "投标截止2026年10月20日")],
                  "business_scope": [fact("海事通信", "岸基AIS系统")], "project_stage": [fact("采购公告", "采购公告")], "exclusions": [], "risks": []}
         self.assertEqual(decide_from_facts(record, facts)["bucket"], "direct_opportunity")
 
@@ -211,9 +211,9 @@ class GovernanceHarnessTests(unittest.TestCase):
 
     def test_procurement_title_completes_only_a_full_core_product_phrase(self):
         record = {"title": "高港船闸AIS岸基基站设备采购公告（二次）", "buyer": "船闸管理处",
-                  "region": "江苏", "content": "投标截止时间：2026年09月20日", "deadline_at": "2026-09-20"}
+                  "region": "江苏", "content": "投标截止时间：2026年10月20日", "deadline_at": "2026-10-20"}
         corpus = " ".join(str(record.get(k) or "") for k in ("title", "buyer", "region", "content"))
-        payload = {"source_objects": [], "participation": [fact("投标截止", "投标截止时间：2026年09月20日")],
+        payload = {"source_objects": [], "participation": [fact("投标截止", "投标截止时间：2026年10月20日")],
                    "business_scope": [], "project_stage": [], "exclusions": [], "risks": []}
         facts = _fact_groups(payload, corpus, record)
         self.assertEqual(facts["source_objects"][0]["name"], "AIS岸基基站")
