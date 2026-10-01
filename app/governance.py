@@ -13,7 +13,7 @@ from copy import deepcopy
 from typing import Any
 
 
-RULEBOOK_VERSION = "2026.09.22-governance-v11-link-fallback"
+RULEBOOK_VERSION = "2026.10.01-governance-v12-disable-crc"
 AI_HARNESS_VERSION = "two-stage-v8-lightweight-guardrails"
 
 # One shared, structured policy is consumed by ingestion, AI review, tests and

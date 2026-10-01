@@ -137,7 +137,7 @@ SOURCES = [
     # ---- 已接入（已实现适配器，可稳定获取公告列表）----
     ("cjhdj", "长江航道局", "https://www.cjhdj.com.cn/", "public_http", "connected", "招标公告列表页为静态 HTML，适配器已实现。"),
     ("csg", "南方电网供应链平台", "https://www.bidding.csg.cn/", "public_http", "connected", "采购公告列表页为静态 HTML，适配器已实现。投标另需企业认证。"),
-    ("crc", "华润守正电子招标", "https://szecp.crc.com.cn/", "public_http", "connected", "招标公告列表页为静态 HTML（需 SSL legacy 兼容），适配器已实现。"),
+    ("crc", "华润守正电子招标", "https://www.szecp.com.cn/", "public_api", "disabled", "按业务要求停用：不再抓取或触发质量告警；已入库历史商机和运行账本保留。"),
     # ---- 待接入（公开但列表页为 JS 动态渲染，标准库无法解析）----
     ("ln_ggzy", "辽宁省公共资源交易平台", "https://ggzy.ln.gov.cn/", "public_http", "covered", "已由全国公共资源交易平台（ggzy）按省拉取覆盖，无需单独适配。"),
     ("sd_ggzy", "山东省公共资源交易中心", "https://ggzyjy.shandong.gov.cn/", "public_http", "covered", "已由全国公共资源交易平台（ggzy）按省拉取覆盖，无需单独适配。"),
@@ -193,6 +193,9 @@ SOURCES = [
     ("sgcc", "国家电网 ECP", "https://ecp.sgcc.com.cn/", "protected", "not_automated", "SPA hash 路由（#/），首屏 9KB 壳；一期使用公开同步公告或人工核验。"),
     ("unicom", "中国联通电子招投标", "https://www.chinaunicombidding.cn/", "protected", "not_automated", "HTTP 412 Precondition Failed（反爬拦截）；详情可能需登录。"),
 ]
+
+# 明确停用的来源保留元数据及历史数据，但不参与抓取、健康告警或失败计数。
+DISABLED_SOURCE_CODES = {"crc"}
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS sources (
@@ -1464,25 +1467,6 @@ def fetch_csg() -> list[dict]:
                            "buyer": "", "region": "广东", "content": ""})
     return items
 
-def fetch_crc() -> list[dict]:
-    """华润守正电子招标平台 — 招标公告列表页（静态 HTML，需 SSL legacy）。
-    列表地址：https://szecp.crc.com.cn/zbxx/006001/006001001/secondpagejy.html
-    链接形如 /zbxx/006001/006001001/20260717/uuid.html，日期从路径提取。
-    """
-    base = "https://szecp.crc.com.cn/zbxx/006001/006001001/secondpagejy.html"
-    html = _http_get(base)
-    items: list[dict] = []
-    pat = re.compile(r'<a[^>]*href="(/zbxx/006001/006001001/(\d{8})/[\w-]+\.html)"[^>]*>(.*?)</a>', re.I | re.S)
-    for m in pat.finditer(html):
-        href, date_raw, raw_title = m.group(1), m.group(2), m.group(3)
-        title = re.sub(r'<[^>]+>', '', raw_title).strip()
-        if len(title) < 6:
-            continue
-        date_str = f"{date_raw[:4]}-{date_raw[4:6]}-{date_raw[6:8]}"
-        items.append({"source_url": urljoin("https://szecp.crc.com.cn/", href), "title": title,
-                       "published_at": date_str, "buyer": "", "region": "", "content": ""})
-    return items
-
 # 天眼查招投标搜索：按业务关键词搜全国招标公告（tyc operation bids，L3 search_bids）。
 # 每个关键词每次抓取消耗 1 次账号额度。未指定 TYC_PROFILE 时保留手工/兼容模式；
 # 定时任务通过 TYC_PROFILE 使用分层检索，控制额度并对搜索索引延迟做回查补偿。
@@ -2386,7 +2370,6 @@ def fetch_hunan() -> list[dict]:
 ADAPTERS: dict[str, callable] = {
     "cjhdj": fetch_cjhdj,
     "csg": fetch_csg,
-    "crc": fetch_crc,
     "tianyancha": fetch_tianyancha,
     "ccgp": fetch_ccgp,
     "ceb": fetch_ceb,
@@ -2497,6 +2480,8 @@ def enrich_buyer(conn: sqlite3.Connection, buyer: str, with_risk: bool = False) 
 
 def fetch_source(conn: sqlite3.Connection, source_code: str) -> tuple[int, int]:
     """执行指定来源的适配器，获取公告并入库。返回 (新增数, 更新数, 跳过数)。"""
+    if source_code in DISABLED_SOURCE_CODES:
+        raise ValueError(f"来源 {source_code} 已停用，不执行抓取")
     adapter = ADAPTERS.get(source_code)
     if not adapter:
         raise ValueError(f"来源 {source_code} 没有已实现的适配器")
@@ -3848,7 +3833,7 @@ async function loadSources(){
   let conn=r.filter(x=>x.status==='connected'&&!x.last_error);
   let pend=r.filter(x=>x.status!=='connected');
   let tagCls=s=>s==='connected'||s==='covered'?'ok':(s==='awaiting_authorization'||s==='not_automated'?'err':'warn');
-  let label=s=>({'connected':'已接入','covered':'已由全国平台覆盖','unreachable':'无法访问','awaiting_authorization':'待授权','not_automated':'不自动化','pending_js':'JS 渲染','pending_timeout':'连接超时','pending_ssl':'SSL 不兼容','pending_structure':'无公告 API','pending_antibot':'反爬拦截','pending_search':'搜索不可用','manual_review':'待人工核验','planned':'计划中'}[s]||s);
+  let label=s=>({'connected':'已接入','disabled':'已停用','covered':'已由全国平台覆盖','unreachable':'无法访问','awaiting_authorization':'待授权','not_automated':'不自动化','pending_js':'JS 渲染','pending_timeout':'连接超时','pending_ssl':'SSL 不兼容','pending_structure':'无公告 API','pending_antibot':'反爬拦截','pending_search':'搜索不可用','manual_review':'待人工核验','planned':'计划中'}[s]||s);
   let addr=x=>x.base_url?`<a class="src-link" href="${esc(x.base_url)}" target="_blank" rel="noopener" title="${esc(x.base_url)}">${esc(x.base_url.replace(/^https?:\/\//,''))}</a>`:'';
   let h='';
   if(conn.length){
@@ -4495,7 +4480,7 @@ def make_handler(db_path: Path):
                     total_c, total_u, total_s = 0, 0, 0
                     errors = []
                     # 常规抓取不含频控敏感来源（ccgp_search 由独立定时任务低频调度）
-                    for code in [c for c in ADAPTERS.keys() if c not in MANUAL_ONLY_SOURCES]:
+                    for code in [c for c in ADAPTERS.keys() if c not in MANUAL_ONLY_SOURCES and c not in DISABLED_SOURCE_CODES]:
                         if code not in ADAPTERS:
                             continue
                         try:
@@ -4767,7 +4752,7 @@ def cmd_sources(args):
     conn=connect(args.db); rows=conn.execute("SELECT code,name,access_mode,status,notes,last_success_at FROM sources ORDER BY CASE status WHEN 'connected' THEN 0 WHEN 'awaiting_authorization' THEN 2 WHEN 'not_automated' THEN 3 ELSE 1 END,name").fetchall(); conn.close()
     connected=[r for r in rows if r["status"]=="connected"]
     pending=[r for r in rows if r["status"]!="connected"]
-    status_labels={"connected":"已接入","awaiting_authorization":"待授权","not_automated":"不自动化","pending_js":"JS渲染","pending_timeout":"连接超时","pending_ssl":"SSL不兼容","pending_structure":"无公告API","pending_antibot":"反爬拦截","pending_search":"搜索不可用","manual_review":"待人工核验","planned":"计划中"}
+    status_labels={"connected":"已接入","disabled":"已停用","awaiting_authorization":"待授权","not_automated":"不自动化","pending_js":"JS渲染","pending_timeout":"连接超时","pending_ssl":"SSL不兼容","pending_structure":"无公告API","pending_antibot":"反爬拦截","pending_search":"搜索不可用","manual_review":"待人工核验","planned":"计划中"}
     if connected:
         print(f"=== 已接入（{len(connected)}）===")
         for r in connected:
@@ -4781,7 +4766,7 @@ def cmd_sources(args):
         print(f"    {r['notes']}")
 def cmd_fetch(args):
     conn=connect(args.db); init_db(conn); seed_sources(conn)
-    sources=[args.source] if args.source else [c for c in ADAPTERS.keys() if c not in MANUAL_ONLY_SOURCES]
+    sources=[args.source] if args.source else [c for c in ADAPTERS.keys() if c not in MANUAL_ONLY_SOURCES and c not in DISABLED_SOURCE_CODES]
     total_created,total_updated,total_skipped=0,0,0
     for code in sources:
         if code not in ADAPTERS:
@@ -5108,6 +5093,8 @@ def cmd_quality_report(args):
     latest_runs = [dict(r) for r in conn.execute("SELECT source_code,status,returned_count,created_count,updated_count,skipped_count,error,finished_at FROM fetch_runs ORDER BY id DESC LIMIT 100")]
     latest_by_source: dict[str, dict] = {}
     for run in latest_runs:
+        if run["source_code"] in DISABLED_SOURCE_CODES:
+            continue
         latest_by_source.setdefault(run["source_code"], run)
     source_alerts, source_observations = [], []
     for code, run in latest_by_source.items():
@@ -5121,6 +5108,8 @@ def cmd_quality_report(args):
     # 节假日无公告或正常去重误报成生产事故。
     history_by_source: dict[str, list[int]] = {}
     for run in conn.execute("SELECT source_code,returned_count,status FROM fetch_runs WHERE status='success' ORDER BY id DESC LIMIT 1000"):
+        if run["source_code"] in DISABLED_SOURCE_CODES:
+            continue
         history_by_source.setdefault(run["source_code"], []).append(int(run["returned_count"] or 0))
     for code, values in history_by_source.items():
         current, baseline = values[0], [v for v in values[1:6] if v > 0]
@@ -5130,7 +5119,7 @@ def cmd_quality_report(args):
                 source_alerts.append({"level":"warning", "source":code, "reason":f"返回量突降：本次 {current}，近期开奖中位数 {median}", "finished_at":latest_by_source.get(code, {}).get("finished_at", "")})
     report["sources"] = {
         "configured": conn.execute("SELECT COUNT(*) FROM sources").fetchone()[0],
-        "runtime_failed": conn.execute("SELECT COUNT(*) FROM sources WHERE last_error IS NOT NULL AND last_error!=''").fetchone()[0],
+        "runtime_failed": conn.execute("SELECT COUNT(*) FROM sources WHERE status!='disabled' AND last_error IS NOT NULL AND last_error!=''").fetchone()[0],
         "latest_runs": latest_runs[:20], "alerts": source_alerts, "observations": source_observations,
     }
     report["ai"] = {"available": AI_REVIEW_DB.exists(), "mismatch": None}
